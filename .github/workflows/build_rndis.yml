@@ -18,9 +18,10 @@ jobs:
 
       - name: Fetch Target Kernel Source
         run: |
-          REPO_URL=$(cat gitrepo)
-          echo "Cloning source from $REPO_URL..."
-          git clone --depth 1 $REPO_URL kernel_source
+          # Extract only the first HTTP/HTTPS URL from gitrepo
+          REPO_URL=$(grep -o -m 1 'https://[^ ]*' gitrepo)
+          echo "Cleaned URL: $REPO_URL"
+          git clone --depth 1 --single-branch $REPO_URL kernel_source
 
       - name: Apply Config & Enable RNDIS Modules
         run: |
@@ -31,12 +32,12 @@ jobs:
           # Copy hexdump0815's default 4.9.170 config
           cp ../config.616-4.9.170-bsp-616+ .config
 
-          # Force enable USB networking framework and RNDIS drivers
+          # Enable USB networking framework and RNDIS drivers
           scripts/config --module CONFIG_USB_USBNET
           scripts/config --module CONFIG_USB_NET_CDCETHER
           scripts/config --module CONFIG_USB_NET_RNDIS_HOST
 
-          # Prepare kernel tree headers for module compilation
+          # Prepare kernel tree headers
           make olddefconfig
           make modules_prepare
 
@@ -46,8 +47,8 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Compile only the USB networking directory
-          make M=drivers/net/usb modules -j$(nproc)
+          # Compile network drivers with restricted threads to avoid runner limits
+          make M=drivers/net/usb modules -j2
 
       - name: Collect & Package .ko Modules
         run: |
