@@ -9,7 +9,7 @@ jobs:
 
     steps:
       - name: Checkout hexdump0815 Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Build Toolchain & Dependencies
         run: |
@@ -18,7 +18,6 @@ jobs:
 
       - name: Fetch Target Kernel Source
         run: |
-          # Read the upstream git repo from hexdump's gitrepo config file
           REPO_URL=$(cat gitrepo)
           echo "Cloning source from $REPO_URL..."
           git clone --depth 1 $REPO_URL kernel_source
@@ -29,7 +28,7 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Copy hexdump0815's default 4.9.170-bsp-616 config
+          # Copy hexdump0815's default 4.9.170 config
           cp ../config.616-4.9.170-bsp-616+ .config
 
           # Force enable USB networking framework and RNDIS drivers
@@ -58,7 +57,7 @@ jobs:
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: h700-rndis-4.9.170-modules
           path: output/
