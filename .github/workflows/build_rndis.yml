@@ -1,11 +1,11 @@
-name: Build RNDIS Kernel Modules
+name: Build KNULLI Scarab RNDIS Kernel Modules
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout GitHub Repository
@@ -14,9 +14,9 @@ jobs:
       - name: Install Build Toolchain & Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git
+          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git libc6-dev
 
-      - name: Fetch Orange Pi H700 Kernel Source
+      - name: Fetch H700 Kernel Source (KNULLI/Batocera Base)
         run: |
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
@@ -26,20 +26,20 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Apply default H700 defconfig
+          # Apply H700 base config
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
-          # Prevent git localversion suffix (-g0cd0547ea) from modifying vermagic
+          # Prevent localversion vermagic appending
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enable ARM64 PLT relocation sections and disable MODVERSIONS CRC checking
+          # Enforce PLT (fixes missing section) and Disable MODVERSIONS (fixes err -22 symbol mismatch)
           scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
           scripts/config --file .config --disable CONFIG_MODVERSIONS
 
-          # Enable core MII and USB networking kernel flags
+          # Enable core MII and USB networking flags
           scripts/config --file .config --enable CONFIG_MII
           scripts/config --file .config --module CONFIG_USB_USBNET
           scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
@@ -47,10 +47,10 @@ jobs:
 
           make ARCH=arm64 olddefconfig
 
-          # Build host scripts and build helpers (genksyms, recordmcount)
-          make ARCH=arm64 KCFLAGS="-w" scripts -j$(nproc)
-          make ARCH=arm64 KCFLAGS="-w" prepare
-          make ARCH=arm64 KCFLAGS="-w" modules_prepare
+          # CRITICAL: Build host scripts (genksyms) using HOSTCFLAGS="-w" to bypass host compiler errors
+          make ARCH=arm64 HOSTCFLAGS="-w" scripts -j$(nproc)
+          make ARCH=arm64 HOSTCFLAGS="-w" prepare -j$(nproc)
+          make ARCH=arm64 HOSTCFLAGS="-w" modules_prepare -j$(nproc)
 
       - name: Compile Network Drivers
         run: |
@@ -58,19 +58,21 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Build full drivers/net directory with KCFLAGS="-w" to bypass modern GCC warnings
+          # Build target directory using KCFLAGS="-w" to suppress GCC warnings that trigger Error 2
           make ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTCFLAGS="-w" \
             KCFLAGS="-w" \
             CONFIG_ARM64_MODULE_PLTS=y \
             CONFIG_MODVERSIONS=n \
             LOCALVERSION="" \
-            M=drivers/net modules -j$(nproc)
+            M=drivers/net/usb modules -j$(nproc)
 
       - name: Collect & Package .ko Modules
         run: |
           mkdir output
           
-          # Copy target USB networking kernel modules
+          # Copy only the required USB network modules (mii is built into KNULLI Scarab kernel)
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
@@ -78,5 +80,5 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: knulli-rndis-4.9.170-modules
+          name: knulli-scarab-rndis-modules
           path: output/
