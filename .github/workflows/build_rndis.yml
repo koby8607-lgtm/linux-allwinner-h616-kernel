@@ -1,4 +1,4 @@
-name: Build RNDIS Kernel Modules
+name: Build RNDIS Kernel Modules (KNULLI Tree)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout hexdump0815 Repository
+      - name: Checkout GitHub Repository
         uses: actions/checkout@v4
 
       - name: Install Build Toolchain & Dependencies
@@ -16,12 +16,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git
 
-      - name: Fetch Target Kernel Source
+      - name: Fetch Official KNULLI Kernel Source
         run: |
-          # Extract only the first HTTP/HTTPS URL from gitrepo
-          REPO_URL=$(grep -o -m 1 'https://[^ ]*' gitrepo)
-          echo "Cleaned URL: $REPO_URL"
-          git clone --depth 1 --single-branch $REPO_URL kernel_source
+          git clone --depth 1 https://github.com/knulli-cfw/knulli-linux.git kernel_source
 
       - name: Apply Config & Enable RNDIS Modules
         run: |
@@ -29,10 +26,10 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Copy hexdump0815's default 4.9.170 config
-          cp ../config.616-4.9.170-bsp-616+ .config
+          # Load default H700 / Allwinner configuration
+          make sun50iw9p1_defconfig
 
-          # Enable USB networking framework and RNDIS drivers
+          # Force enable USB networking framework and RNDIS drivers
           scripts/config --module CONFIG_USB_USBNET
           scripts/config --module CONFIG_USB_NET_CDCETHER
           scripts/config --module CONFIG_USB_NET_RNDIS_HOST
@@ -47,7 +44,6 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Compile network drivers with restricted threads to avoid runner limits
           make M=drivers/net/usb modules -j2
 
       - name: Collect & Package .ko Modules
@@ -60,5 +56,5 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: h700-rndis-4.9.170-modules
+          name: knulli-rndis-4.9.170-modules
           path: output/
