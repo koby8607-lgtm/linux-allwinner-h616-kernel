@@ -30,32 +30,39 @@ jobs:
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
-          # Force enable MII core dependency and USB networking framework
-          scripts/config --module CONFIG_MII
-          scripts/config --module CONFIG_USB_USBNET
-          scripts/config --module CONFIG_USB_NET_CDCETHER
-          scripts/config --module CONFIG_USB_NET_RNDIS_HOST
+          # Prevent git localversion suffix (-g0cd0547ea) from being appended
+          echo "" > .scmversion
+          scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
+          scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          make olddefconfig
-          make modules_prepare
+          # Enable module symbol versioning required by running kernel
+          scripts/config --file .config --enable CONFIG_MODVERSIONS
+
+          # Force enable MII core dependency and USB networking framework
+          scripts/config --file .config --module CONFIG_MII
+          scripts/config --file .config --module CONFIG_USB_USBNET
+          scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
+          scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
+
+          make ARCH=arm64 olddefconfig
+          make ARCH=arm64 modules_prepare
 
       - name: Compile Network Drivers
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
+          export LOCALVERSION=""
 
-          # Target drivers/net to compile both mii.ko and drivers/net/usb/
-          make M=drivers/net modules -j2
+          # Target drivers/net to compile both mii.ko and USB drivers
+          make ARCH=arm64 M=drivers/net modules -j2
 
       - name: Collect & Package .ko Modules
         run: |
           mkdir output
           
-          # Find and copy mii.ko from drivers/net tree
+          # Copy compiled drivers
           find kernel_source/drivers/net/ -name "mii.ko" -exec cp {} output/ \;
-          
-          # Copy USB networking drivers
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
