@@ -26,7 +26,7 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Apply default H700 config
+          # Apply default H700 defconfig
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
@@ -46,11 +46,11 @@ jobs:
           scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
 
           make ARCH=arm64 olddefconfig
-          
-          # CRITICAL: Build host scripts (including genksyms) before out-of-tree module builds
-          make ARCH=arm64 scripts -j$(nproc)
-          make ARCH=arm64 prepare
-          make ARCH=arm64 modules_prepare
+
+          # Build host scripts and build helpers (genksyms, recordmcount)
+          make ARCH=arm64 KCFLAGS="-w" scripts -j$(nproc)
+          make ARCH=arm64 KCFLAGS="-w" prepare
+          make ARCH=arm64 KCFLAGS="-w" modules_prepare
 
       - name: Compile Network Drivers
         run: |
@@ -58,11 +58,13 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
+          # Build full drivers/net directory with KCFLAGS="-w" to bypass modern GCC warnings
           make ARCH=arm64 \
+            KCFLAGS="-w" \
             CONFIG_ARM64_MODULE_PLTS=y \
             CONFIG_MODVERSIONS=n \
             LOCALVERSION="" \
-            M=drivers/net/usb modules -j$(nproc)
+            M=drivers/net modules -j$(nproc)
 
       - name: Collect & Package .ko Modules
         run: |
