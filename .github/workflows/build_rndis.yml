@@ -20,13 +20,13 @@ jobs:
         run: |
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
-      - name: Configure & Enable Drivers
+      - name: Configure Kernel Tree
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Apply base H700 configuration
+          # Apply default H700 config
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
@@ -35,17 +35,18 @@ jobs:
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # REQUIRED: Enable ARM64 PLT relocation sections & symbol versioning
+          # Enforce PLT and symbol versioning in config
           scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
           scripts/config --file .config --enable CONFIG_MODVERSIONS
 
-          # Force enable MII core dependency and USB networking framework
+          # Configure modules
           scripts/config --file .config --module CONFIG_MII
           scripts/config --file .config --module CONFIG_USB_USBNET
           scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
           scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
 
           make ARCH=arm64 olddefconfig
+          make ARCH=arm64 prepare
           make ARCH=arm64 modules_prepare
 
       - name: Compile Network Drivers
@@ -53,10 +54,13 @@ jobs:
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export LOCALVERSION=""
 
-          # Build drivers/net subsystem
-          make ARCH=arm64 M=drivers/net modules -j2
+          # Force PLT section generation directly during module build step
+          make ARCH=arm64 \
+            CONFIG_ARM64_MODULE_PLTS=y \
+            CONFIG_MODVERSIONS=y \
+            LOCALVERSION="" \
+            M=drivers/net modules -j2
 
       - name: Collect & Package .ko Modules
         run: |
