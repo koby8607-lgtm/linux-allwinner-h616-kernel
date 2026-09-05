@@ -20,14 +20,22 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/knulli-cfw/knulli-linux.git kernel_source
 
-      - name: Apply Config & Enable RNDIS Modules
+      - name: Locate & Apply Target Defconfig
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Load default H700 / Allwinner configuration
-          make sun50iw9p1_defconfig
+          # Find any available sun50i or h700 defconfig file in the repository
+          CONF_FILE=$(find arch/arm64/configs/ -type f \( -name "*sun50i*" -o -name "*h700*" -o -name "*defconfig*" \) | head -n 1)
+
+          if [ -n "$CONF_FILE" ]; then
+            echo "Found configuration: $CONF_FILE"
+            cp "$CONF_FILE" .config
+          else
+            echo "Fallback to default arm64 defconfig"
+            make defconfig
+          fi
 
           # Force enable USB networking framework and RNDIS drivers
           scripts/config --module CONFIG_USB_USBNET
