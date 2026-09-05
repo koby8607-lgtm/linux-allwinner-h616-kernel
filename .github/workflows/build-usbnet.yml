@@ -1,0 +1,269 @@
+name: Build H700 4.9.170 USB Network Modules
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-usbnet:
+    runs-on: ubuntu-22.04
+
+    env:
+      KERNEL_VERSION: "4.9.170"
+      ARCH: "arm64"
+      CROSS_COMPILE: "aarch64-buildroot-linux-gnu-"
+      SDK_URL: "https://github.com/knulli-cfw/toolchains/releases/download/rg35xx-plush-sdk-20240421/aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz"
+      KERNEL_URL: "https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.9.170.tar.gz"
+      KERNEL_CONFIG_URL: "https://raw.githubusercontent.com/knulli-cfw/knulli-linux/refs/heads/knulli-main/board/allwinner/h700/linux-sunxi64-legacy.config"
+
+    steps:
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            kmod \
+            wget \
+            ca-certificates \
+            xz-utils \
+            cpio \
+            file
+
+      - name: Download Linux 4.9.170
+        run: |
+          wget -q --show-progress "$KERNEL_URL" -O linux-${KERNEL_VERSION}.tar.gz
+          tar -xzf linux-${KERNEL_VERSION}.tar.gz
+
+      - name: Install H700 KNULLI kernel configuration
+        working-directory: linux-4.9.170
+        run: |
+          wget -q "$KERNEL_CONFIG_URL" -O .config
+
+          echo "Original USB networking configuration:"
+          grep -E \
+            'CONFIG_MII=|CONFIG_USB_USBNET=|CONFIG_USB_NET_CDCETHER=|CONFIG_USB_NET_RNDIS_HOST=' \
+            .config || true
+
+      - name: Change only required USB networking options
+        working-directory: linux-4.9.170
+        run: |
+          # MII is built into the H700 kernel and MUST remain built-in.
+          # Do NOT create mii.ko.
+          sed -i -E 's/^CONFIG_MII=.*/CONFIG_MII=y/' .config
+
+          # These three drivers must be loadable modules.
+          sed -i -E 's/^CONFIG_USB_USBNET=.*/CONFIG_USB_USBNET=m/' .config
+          sed -i -E 's/^CONFIG_USB_NET_CDCETHER=.*/CONFIG_USB_NET_CDCETHER=m/' .config
+          sed -i -E 's/^CONFIG_USB_NET_RNDIS_HOST=.*/CONFIG_USB_NET_RNDIS_HOST=m/' .config
+
+          # Append them if a future config ever lacks one of the entries.
+          grep -q '^CONFIG_MII=' .config || echo 'CONFIG_MII=y' >> .config
+          grep -q '^CONFIG_USB_USBNET=' .config || echo 'CONFIG_USB_USBNET=m' >> .config
+          grep -q '^CONFIG_USB_NET_CDCETHER=' .config || echo 'CONFIG_USB_NET_CDCETHER=m' >> .config
+          grep -q '^CONFIG_USB_NET_RNDIS_HOST=' .config || echo 'CONFIG_USB_NET_RNDIS_HOST=m' >> .config
+
+          echo
+          echo "Final USB networking configuration:"
+          grep -E \
+            'CONFIG_MII=|CONFIG_USB_USBNET=|CONFIG_USB_NET_CDCETHER=|CONFIG_USB_NET_RNDIS_HOST=' \
+            .config
+
+      - name: Prepare old 4.9 kernel source
+        working-directory: linux-4.9.170
+        run: |
+          # Linux 4.9's shipped DTC source can fail with modern host tools.
+          sed -i \
+            's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' \
+            scripts/dtc/dtc-lexer.lex.c_shipped
+
+          make ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            olddefconfig
+
+      - name: Download KNULLI aarch64 toolchain
+        run: |
+          wget -q --show-progress "$SDK_URL" \
+            -O aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz
+
+          tar -xzf aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz
+
+          aarch64-buildroot-linux-gnu_sdk-buildroot/relocate-sdk.sh
+
+      - name: Configure toolchain environment
+        run: |
+          SDK="${GITHUB_WORKSPACE}/aarch64-buildroot-linux-gnu_sdk-buildroot"
+
+          echo "PATH=${SDK}/bin:${PATH}" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE=${CROSS_COMPILE}" >> "$GITHUB_ENV"
+
+          echo "SDK=${SDK}" >> "$GITHUB_ENV"
+          echo "SYSROOT=${SDK}/${CROSS_COMPILE%?}/sysroot" >> "$GITHUB_ENV"
+
+      - name: Verify cross compiler
+        run: |
+          command -v "${CROSS_COMPILE}gcc"
+          "${CROSS_COMPILE}gcc" --version
+
+      - name: Prepare kernel build
+        working-directory: linux-4.9.170
+        run: |
+          make ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            modules_prepare
+
+      - name: Build kernel symbol table
+        working-directory: linux-4.9.170
+        run: |
+          # CONFIG_MODVERSIONS=y in the H700 kernel config.
+          # Build vmlinux first so Module.symvers contains the same
+          # symbol CRC information used by the resulting modules.
+          make -j"$(nproc)" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            vmlinux
+
+          test -s Module.symvers
+
+          echo "Module.symvers generated:"
+          wc -l Module.symvers
+
+      - name: Build USB networking modules
+        working-directory: linux-4.9.170
+        run: |
+          make -j"$(nproc)" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            M=drivers/net/usb \
+            modules
+
+      - name: Verify generated modules
+        working-directory: linux-4.9.170
+        run: |
+          set -eux
+
+          test -f drivers/net/usb/usbnet.ko
+          test -f drivers/net/usb/cdc_ether.ko
+          test -f drivers/net/usb/rndis_host.ko
+
+          echo
+          echo "Generated modules:"
+          file \
+            drivers/net/usb/usbnet.ko \
+            drivers/net/usb/cdc_ether.ko \
+            drivers/net/usb/rndis_host.ko
+
+          echo
+          echo "Kernel configuration:"
+          grep -E \
+            'CONFIG_MII=|CONFIG_MODVERSIONS=|CONFIG_USB_USBNET=|CONFIG_USB_NET_CDCETHER=|CONFIG_USB_NET_RNDIS_HOST=' \
+            .config
+
+          echo
+          echo "Module vermagic:"
+          modinfo -F vermagic drivers/net/usb/usbnet.ko
+          modinfo -F vermagic drivers/net/usb/cdc_ether.ko
+          modinfo -F vermagic drivers/net/usb/rndis_host.ko
+
+          echo
+          echo "usbnet dependencies:"
+          modinfo -F depends drivers/net/usb/usbnet.ko || true
+
+          echo
+          echo "cdc_ether dependencies:"
+          modinfo -F depends drivers/net/usb/cdc_ether.ko || true
+
+          echo
+          echo "rndis_host dependencies:"
+          modinfo -F depends drivers/net/usb/rndis_host.ko || true
+
+          echo
+          echo "Checking that mii.ko was NOT produced:"
+          test ! -f drivers/net/usb/mii.ko
+
+      - name: Stage modules
+        run: |
+          rm -rf output
+          mkdir -p output/lib/modules/${KERNEL_VERSION}
+
+          cp linux-4.9.170/drivers/net/usb/usbnet.ko \
+             output/lib/modules/${KERNEL_VERSION}/
+
+          cp linux-4.9.170/drivers/net/usb/cdc_ether.ko \
+             output/lib/modules/${KERNEL_VERSION}/
+
+          cp linux-4.9.170/drivers/net/usb/rndis_host.ko \
+             output/lib/modules/${KERNEL_VERSION}/
+
+          # Generate dependency metadata for modprobe.
+          depmod -b output "${KERNEL_VERSION}"
+
+          # Keep the three requested modules prominent at the top level too.
+          cp output/lib/modules/${KERNEL_VERSION}/usbnet.ko \
+             output/usbnet.ko
+
+          cp output/lib/modules/${KERNEL_VERSION}/cdc_ether.ko \
+             output/cdc_ether.ko
+
+          cp output/lib/modules/${KERNEL_VERSION}/rndis_host.ko \
+             output/rndis_host.ko
+
+          cat > output/load-usb-tether.sh <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+
+          MODDIR="$(dirname "$(readlink -f "$0")")/lib/modules/4.9.170"
+
+          insmod "$MODDIR/usbnet.ko"
+          insmod "$MODDIR/cdc_ether.ko"
+          insmod "$MODDIR/rndis_host.ko"
+          SCRIPT
+
+          chmod +x output/load-usb-tether.sh
+
+          cat > output/README.txt <<'TXT'
+          H700 / KNULLI / Linux 4.9.170 USB tethering modules
+
+          Modules:
+            usbnet.ko
+            cdc_ether.ko
+            rndis_host.ko
+
+          IMPORTANT:
+            Do NOT load mii.ko.
+            The H700 4.9.170 kernel has MII built into the kernel
+            (CONFIG_MII=y).
+
+          Recommended loading order:
+            usbnet
+            cdc_ether
+            rndis_host
+
+          Or use load-usb-tether.sh.
+
+          These modules were built from Linux 4.9.170 using the
+          KNULLI H700 linux-sunxi64-legacy.config.
+          TXT
+
+      - name: Create release archive
+        run: |
+          tar -C output -czf \
+            h700-usbnet-4.9.170-aarch64.tar.gz \
+            .
+
+          sha256sum h700-usbnet-4.9.170-aarch64.tar.gz \
+            > h700-usbnet-4.9.170-aarch64.tar.gz.sha256
+
+      - name: Upload modules as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: h700-usbnet-4.9.170-aarch64
+          path: |
+            h700-usbnet-4.9.170-aarch64.tar.gz
+            h700-usbnet-4.9.170-aarch64.tar.gz.sha256
