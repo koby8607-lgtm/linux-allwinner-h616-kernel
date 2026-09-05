@@ -16,7 +16,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git
 
-      - name: Fetch Allwinner H700 Kernel Source
+      - name: Fetch Orange Pi H700 Kernel Source
         run: |
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
@@ -35,12 +35,12 @@ jobs:
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enforce PLT and symbol versioning in config
+          # CRITICAL: Keep PLT enabled, DISABLE MODVERSIONS to bypass symbol CRC version mismatches
           scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
-          scripts/config --file .config --enable CONFIG_MODVERSIONS
+          scripts/config --file .config --disable CONFIG_MODVERSIONS
 
-          # Configure modules
-          scripts/config --file .config --module CONFIG_MII
+          # mii is built-in on stock kernel; build only USB networking as modules
+          scripts/config --file .config --enable CONFIG_MII
           scripts/config --file .config --module CONFIG_USB_USBNET
           scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
           scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
@@ -55,18 +55,17 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Force PLT section generation directly during module build step
           make ARCH=arm64 \
             CONFIG_ARM64_MODULE_PLTS=y \
-            CONFIG_MODVERSIONS=y \
+            CONFIG_MODVERSIONS=n \
             LOCALVERSION="" \
-            M=drivers/net modules -j2
+            M=drivers/net/usb modules -j$(nproc)
 
       - name: Collect & Package .ko Modules
         run: |
           mkdir output
           
-          find kernel_source/drivers/net/ -name "mii.ko" -exec cp {} output/ \;
+          # Collect only the required USB network drivers
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
