@@ -18,7 +18,6 @@ jobs:
 
       - name: Fetch Allwinner H700/H616 Kernel Source
         run: |
-          # Pull the actual Linux 4.9 kernel source tree used for H700
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
       - name: Configure & Enable Drivers
@@ -27,15 +26,23 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Apply standard Allwinner sun50iw9 (H616/H700) configuration
-          make sun50iw9p1_defconfig
+          # Locate the actual sun50i or defconfig file in the repository
+          CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
+          
+          if [ -n "$CONFIG_PATH" ]; then
+            echo "Applying configuration from: $CONFIG_PATH"
+            cp "$CONFIG_PATH" .config
+          else
+            echo "Falling back to generic defconfig..."
+            make defconfig
+          fi
 
           # Force enable USB networking framework and RNDIS drivers
           scripts/config --module CONFIG_USB_USBNET
           scripts/config --module CONFIG_USB_NET_CDCETHER
           scripts/config --module CONFIG_USB_NET_RNDIS_HOST
 
-          # Prepare headers for standalone driver compilation
+          # Prepare headers for module compilation
           make olddefconfig
           make modules_prepare
 
