@@ -30,27 +30,26 @@ jobs:
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
-          # Prevent localversion vermagic appending
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Explicitly enable module support infrastructure
+          # Core dependencies required for modules and networking
           scripts/config --file .config --enable CONFIG_MODULES
-
-          # Enforce ARM64 PLTs and disable MODVERSIONS CRC checking
-          scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
-          scripts/config --file .config --disable CONFIG_MODVERSIONS
-
-          # Enable core MII and USB networking flags
+          scripts/config --file .config --enable CONFIG_NETDEVICES
+          scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
           scripts/config --file .config --enable CONFIG_MII
+
+          # Module targets
           scripts/config --file .config --module CONFIG_USB_USBNET
           scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
           scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
 
+          scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
+          scripts/config --file .config --disable CONFIG_MODVERSIONS
+
           make ARCH=arm64 olddefconfig
 
-          # Prepare headers, asm links, and build genksyms/modpost scripts
           make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j$(nproc)
           make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j$(nproc)
 
@@ -60,13 +59,17 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Build target directory using KCFLAGS="-w" to suppress GCC warnings
+          # Pass module flags directly to make to prevent silent skipping
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCFLAGS="-w" \
             KCFLAGS="-w" \
             CONFIG_ARM64_MODULE_PLTS=y \
             CONFIG_MODVERSIONS=n \
+            CONFIG_USB_NET_DRIVERS=y \
+            CONFIG_USB_USBNET=m \
+            CONFIG_USB_NET_CDCETHER=m \
+            CONFIG_USB_NET_RNDIS_HOST=m \
             LOCALVERSION="" \
             M=drivers/net/usb modules -j$(nproc)
 
@@ -74,10 +77,13 @@ jobs:
         run: |
           mkdir output
           
-          # Copy target USB network modules
-          cp kernel_source/drivers/net/usb/usbnet.ko output/
-          cp kernel_source/drivers/net/usb/cdc_ether.ko output/
-          cp kernel_source/drivers/net/usb/rndis_host.ko output/
+          # Use find to locate files dynamically in case of path shifting
+          find kernel_source/drivers/net/usb -name "usbnet.ko" -exec cp {} output/ \;
+          find kernel_source/drivers/net/usb -name "cdc_ether.ko" -exec cp {} output/ \;
+          find kernel_source/drivers/net/usb -name "rndis_host.ko" -exec cp {} output/ \;
+
+          # Verify files exist before upload
+          ls -lh output/
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
