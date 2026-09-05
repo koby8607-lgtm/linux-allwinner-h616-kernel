@@ -35,7 +35,10 @@ jobs:
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enforce PLT (fixes missing section) and Disable MODVERSIONS (fixes err -22 symbol mismatch)
+          # Explicitly enable module support infrastructure
+          scripts/config --file .config --enable CONFIG_MODULES
+
+          # Enforce ARM64 PLTs and disable MODVERSIONS CRC checking
           scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
           scripts/config --file .config --disable CONFIG_MODVERSIONS
 
@@ -47,10 +50,9 @@ jobs:
 
           make ARCH=arm64 olddefconfig
 
-          # CRITICAL: Build host scripts (genksyms) using HOSTCFLAGS="-w" to bypass host compiler errors
-          make ARCH=arm64 HOSTCFLAGS="-w" scripts -j$(nproc)
-          make ARCH=arm64 HOSTCFLAGS="-w" prepare -j$(nproc)
-          make ARCH=arm64 HOSTCFLAGS="-w" modules_prepare -j$(nproc)
+          # Prepare headers, asm links, and build genksyms/modpost scripts
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j$(nproc)
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j$(nproc)
 
       - name: Compile Network Drivers
         run: |
@@ -58,7 +60,7 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Build target directory using KCFLAGS="-w" to suppress GCC warnings that trigger Error 2
+          # Build target directory using KCFLAGS="-w" to suppress GCC warnings
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCFLAGS="-w" \
@@ -72,7 +74,7 @@ jobs:
         run: |
           mkdir output
           
-          # Copy only the required USB network modules (mii is built into KNULLI Scarab kernel)
+          # Copy target USB network modules
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
