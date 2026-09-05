@@ -26,16 +26,17 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Find and apply base H700/sun50i configuration
+          # Apply base H700 configuration
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
-          # Prevent git localversion suffix (-g0cd0547ea) from being appended
+          # Prevent git localversion suffix (-g0cd0547ea)
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enable module symbol versioning required by running kernel
+          # REQUIRED: Enable ARM64 PLT relocation sections & symbol versioning
+          scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
           scripts/config --file .config --enable CONFIG_MODVERSIONS
 
           # Force enable MII core dependency and USB networking framework
@@ -54,14 +55,13 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LOCALVERSION=""
 
-          # Target drivers/net to compile both mii.ko and USB drivers
+          # Build drivers/net subsystem
           make ARCH=arm64 M=drivers/net modules -j2
 
       - name: Collect & Package .ko Modules
         run: |
           mkdir output
           
-          # Copy compiled drivers
           find kernel_source/drivers/net/ -name "mii.ko" -exec cp {} output/ \;
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
