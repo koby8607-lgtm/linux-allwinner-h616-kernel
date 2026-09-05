@@ -14,13 +14,13 @@ jobs:
       - name: Install Build Toolchain & Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git
+          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git
 
       - name: Fetch Orange Pi H700 Kernel Source
         run: |
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
-      - name: Configure Kernel Tree
+      - name: Configure Kernel Tree & Build Host Tools
         run: |
           cd kernel_source
           export ARCH=arm64
@@ -30,22 +30,25 @@ jobs:
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
-          # Prevent git localversion suffix (-g0cd0547ea)
+          # Prevent git localversion suffix (-g0cd0547ea) from modifying vermagic
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # CRITICAL: Keep PLT enabled, DISABLE MODVERSIONS to bypass symbol CRC version mismatches
+          # Enable ARM64 PLT relocation sections and disable MODVERSIONS CRC checking
           scripts/config --file .config --enable CONFIG_ARM64_MODULE_PLTS
           scripts/config --file .config --disable CONFIG_MODVERSIONS
 
-          # mii is built-in on stock kernel; build only USB networking as modules
+          # Enable core MII and USB networking kernel flags
           scripts/config --file .config --enable CONFIG_MII
           scripts/config --file .config --module CONFIG_USB_USBNET
           scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
           scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
 
           make ARCH=arm64 olddefconfig
+          
+          # CRITICAL: Build host scripts (including genksyms) before out-of-tree module builds
+          make ARCH=arm64 scripts -j$(nproc)
           make ARCH=arm64 prepare
           make ARCH=arm64 modules_prepare
 
@@ -65,7 +68,7 @@ jobs:
         run: |
           mkdir output
           
-          # Collect only the required USB network drivers
+          # Copy target USB networking kernel modules
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
