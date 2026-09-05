@@ -1,14 +1,36 @@
-- name: Configure & Enable Drivers
+name: Build RNDIS Kernel Modules
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout GitHub Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git
+
+      - name: Fetch Allwinner H700 Kernel Source
+        run: |
+          git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
+
+      - name: Configure & Enable Drivers
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Find and apply base configuration
+          # Find and apply base H700/sun50i configuration
           CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
           cp "$CONFIG_PATH" .config
 
-          # Force enable MII core dependency alongside USB networking framework
+          # Force enable MII core dependency and USB networking framework
           scripts/config --module CONFIG_MII
           scripts/config --module CONFIG_USB_USBNET
           scripts/config --module CONFIG_USB_NET_CDCETHER
@@ -23,14 +45,23 @@
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Build both net core drivers and usb drivers
+          # Target drivers/net to compile both mii.ko and drivers/net/usb/
           make M=drivers/net modules -j2
 
       - name: Collect & Package .ko Modules
         run: |
           mkdir output
-          # Copy mii.ko if built as a module, along with usbnet stack
+          
+          # Find and copy mii.ko from drivers/net tree
           find kernel_source/drivers/net/ -name "mii.ko" -exec cp {} output/ \;
+          
+          # Copy USB networking drivers
           cp kernel_source/drivers/net/usb/usbnet.ko output/
           cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           cp kernel_source/drivers/net/usb/rndis_host.ko output/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: knulli-rndis-4.9.170-modules
+          path: output/
