@@ -1,4 +1,3 @@
-```yaml
 name: Build KNULLI H700 RNDIS Host Module
 
 on:
@@ -355,4 +354,3 @@ jobs:
             artifact/README.txt
             artifact/rndis_host-knulli-h700.zip
           if-no-files-found: error
-```
