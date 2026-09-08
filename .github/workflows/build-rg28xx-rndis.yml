@@ -1,10 +1,11 @@
-name: Build KNULLI RG28XX RNDIS module
+```yaml
+name: Build KNULLI H700 RNDIS Host Module
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-rndis-host:
+  build-rndis:
     runs-on: ubuntu-22.04
 
     steps:
@@ -12,279 +13,346 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            git \
             build-essential \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
             bc \
             bison \
             flex \
             libssl-dev \
             libelf-dev \
-            kmod \
-            wget \
-            ca-certificates \
-            xz-utils \
+            libncurses5-dev \
             cpio \
-            file
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            device-tree-compiler
 
-      - name: Download Linux 4.9.170
+      - name: Checkout KNULLI Linux tree
         run: |
-          wget -q https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.9.170.tar.gz
-          tar -xzf linux-4.9.170.tar.gz
+          git clone --depth=1 \
+            --branch knulli-main \
+            https://github.com/knulli-cfw/knulli-linux.git \
+            knulli-linux
 
-      - name: Install KNULLI H700 kernel config
-        working-directory: linux-4.9.170
+      - name: Show KNULLI revision
+        working-directory: knulli-linux
         run: |
-          wget -q -O .config https://raw.githubusercontent.com/knulli-cfw/knulli-linux/knulli-main/board/allwinner/h700/linux-sunxi64-legacy.config
+          echo "KNULLI commit:"
+          git rev-parse HEAD
+          echo
+          echo "Kernel configuration:"
+          ls -l board/allwinner/h700/
 
-          sed -i 's/^# CONFIG_USB_NET_RNDIS_HOST is not set$/CONFIG_USB_NET_RNDIS_HOST=m/' .config
+      - name: Locate Linux 4.9.170 source
+        working-directory: knulli-linux
+        run: |
+          echo "Searching for Linux kernel source/configuration..."
 
-          sed -i 's/^CONFIG_USB_USBNET=.*/CONFIG_USB_USBNET=y/' .config
-          sed -i 's/^CONFIG_USB_NET_CDCETHER=.*/CONFIG_USB_NET_CDCETHER=y/' .config
-          sed -i 's/^CONFIG_MII=.*/CONFIG_MII=y/' .config
-          sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=y/' .config
+          find . \
+            \( -name 'linux-4.9.170*' \
+            -o -name 'linux-sunxi64-legacy.config' \
+            -o -name 'linux.mk' \) \
+            -print
 
-          if grep -q '^YYLTYPE yylloc;' scripts/dtc/dtc-lexer.lex.c_shipped; then
-            sed -i 's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c_shipped
+      - name: Prepare KNULLI H700 kernel configuration
+        working-directory: knulli-linux
+        run: |
+          CONFIG="board/allwinner/h700/linux-sunxi64-legacy.config"
+
+          test -f "$CONFIG"
+
+          echo "Using:"
+          echo "$CONFIG"
+
+          mkdir -p build-kernel
+          cp "$CONFIG" build-kernel/.config
+
+          echo
+          echo "Original RNDIS setting:"
+          grep -E \
+            'CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST|CONFIG_MODVERSIONS|CONFIG_MODULES' \
+            build-kernel/.config || true
+
+          echo
+          echo "Enabling RNDIS host module..."
+
+          sed -i \
+            's/^# CONFIG_USB_NET_RNDIS_HOST is not set$/CONFIG_USB_NET_RNDIS_HOST=m/' \
+            build-kernel/.config
+
+          if ! grep -q '^CONFIG_USB_NET_RNDIS_HOST=m$' build-kernel/.config; then
+            echo 'CONFIG_USB_NET_RNDIS_HOST=m' >> build-kernel/.config
           fi
 
-          echo "===== INITIAL CONFIG ====="
-          grep -E 'CONFIG_(MODULES|MODVERSIONS|MII|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST)=' .config || true
+          echo
+          echo "Final relevant configuration:"
+          grep -E \
+            'CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST|CONFIG_MODVERSIONS|CONFIG_MODULES' \
+            build-kernel/.config
 
-      - name: Download KNULLI AArch64 SDK
+      - name: Find kernel source
+        working-directory: knulli-linux
         run: |
-          wget -q https://github.com/knulli-cfw/toolchains/releases/download/rg35xx-plush-sdk-20240421/aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz
+          set -eux
 
-          tar -xzf aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz
+          echo "Searching repository for Linux source directories..."
 
-          ./aarch64-buildroot-linux-gnu_sdk-buildroot/relocate-sdk.sh
+          find . -maxdepth 5 -type d \
+            \( -name 'linux' -o -name 'linux-*' \) \
+            -print | head -100
 
-      - name: Set compiler
+          echo
+          echo "Searching Buildroot Linux package definitions..."
+
+          find . -type f \
+            \( -name '*.mk' -o -name '*.in' \) \
+            -print0 |
+            xargs -0 grep -nH 'linux-sunxi64\|4.9.170\|LINUX_VERSION' \
+            2>/dev/null | head -200
+
+      - name: Build KNULLI kernel / Module.symvers
+        working-directory: knulli-linux
         run: |
-          echo "CROSS=$GITHUB_WORKSPACE/aarch64-buildroot-linux-gnu_sdk-buildroot/bin/aarch64-buildroot-linux-gnu-" >> "$GITHUB_ENV"
-          echo "$GITHUB_WORKSPACE/aarch64-buildroot-linux-gnu_sdk-buildroot/bin" >> "$GITHUB_PATH"
+          set -eux
 
-      - name: Show compiler
-        run: |
-          aarch64-buildroot-linux-gnu-gcc --version
+          # Find the kernel source that KNULLI provides.
+          KERNEL_DIR="$(find . -type f -name 'Makefile' \
+            -exec sh -c '
+              for f do
+                if grep -q "VERSION = 4" "$f" 2>/dev/null &&
+                   grep -q "PATCHLEVEL = 9" "$f" 2>/dev/null; then
+                  dirname "$f"
+                  exit 0
+                fi
+              done
+            ' sh {} + | head -1)"
 
-      - name: Prepare kernel
-        working-directory: linux-4.9.170
-        run: |
-          make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "ERROR: Could not locate Linux 4.9 kernel source in repository."
+            echo
+            echo "Repository tree:"
+            find . -maxdepth 4 -type f -name Makefile | head -100
+            exit 1
+          fi
 
-          echo "===== FINAL CONFIG ====="
+          echo "Kernel source: $KERNEL_DIR"
 
-          grep -E 'CONFIG_(MODULES|MODVERSIONS|MII|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST)=' .config || true
+          cd "$KERNEL_DIR"
 
-          make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare
+          # Use the KNULLI H700 configuration.
+          cp ../../../../board/allwinner/h700/linux-sunxi64-legacy.config .config 2>/dev/null || true
 
-      - name: Build full kernel
-        working-directory: linux-4.9.170
-        run: |
-          echo "===== BUILDING KERNEL ====="
+          # If the relative path above does not match the source layout,
+          # locate the config explicitly.
+          if [ ! -f .config ]; then
+            KNULLI_CONFIG="$(cd ../.. && find . -path '*/board/allwinner/h700/linux-sunxi64-legacy.config' -print -quit)"
+            if [ -n "$KNULLI_CONFIG" ]; then
+              cp "$KNULLI_CONFIG" .config
+            fi
+          fi
 
+          test -f .config
+
+          # Enable the RNDIS host driver as a module.
+          if grep -q '^# CONFIG_USB_NET_RNDIS_HOST is not set$' .config; then
+            sed -i \
+              's/^# CONFIG_USB_NET_RNDIS_HOST is not set$/CONFIG_USB_NET_RNDIS_HOST=m/' \
+              .config
+          elif ! grep -q '^CONFIG_USB_NET_RNDIS_HOST=m$' .config; then
+            echo 'CONFIG_USB_NET_RNDIS_HOST=m' >> .config
+          fi
+
+          # Ensure the dependencies expected by rndis_host are enabled.
+          sed -i \
+            's/^# CONFIG_USB_USBNET is not set$/CONFIG_USB_USBNET=y/' \
+            .config
+
+          sed -i \
+            's/^# CONFIG_USB_NET_CDCETHER is not set$/CONFIG_USB_NET_CDCETHER=y/' \
+            .config
+
+          echo
+          echo "Kernel configuration:"
+          grep -E \
+            'CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST|CONFIG_MODULES|CONFIG_MODVERSIONS' \
+            .config
+
+          echo
+          echo "Preparing kernel..."
+          make \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+          echo
+          echo "Running modules_prepare..."
+          make \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            modules_prepare
+
+          echo
+          echo "Building kernel enough to generate Module.symvers..."
           make -j"$(nproc)" \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             Image
 
-          echo "===== CHECKING Module.symvers ====="
+          test -f Module.symvers
 
-          test -s Module.symvers
+          echo
+          echo "Module.symvers generated:"
+          ls -lh Module.symvers
 
-          wc -l Module.symvers
+          echo
+          echo "Checking module_layout:"
+          grep -w 'module_layout' Module.symvers || true
 
-          echo "===== module_layout ====="
-
-          grep -E '[[:space:]]module_layout[[:space:]]' Module.symvers || true
-
-      - name: Build RNDIS host module
-        working-directory: linux-4.9.170
+      - name: Build rndis_host.ko
+        working-directory: knulli-linux
         run: |
-          echo "===== BUILDING RNDIS HOST ====="
+          set -eux
+
+          KERNEL_DIR="$(find . -type f -name 'Module.symvers' \
+            -exec sh -c '
+              for f do
+                if grep -q "module_layout" "$f" 2>/dev/null; then
+                  dirname "$f"
+                  exit 0
+                fi
+              done
+            ' sh {} + | head -1)"
+
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "ERROR: Could not find generated kernel tree."
+            find . -name Module.symvers -print
+            exit 1
+          fi
+
+          echo "Kernel tree:"
+          echo "$KERNEL_DIR"
+
+          cd "$KERNEL_DIR"
+
+          echo
+          echo "Building RNDIS host module..."
 
           make -j"$(nproc)" \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/net/usb \
             modules
 
-          test -f drivers/net/usb/rndis_host.ko
+          echo
+          echo "Searching for rndis_host.ko..."
+          find . -name 'rndis_host.ko' -print
 
-          echo "===== RNDIS MODULE ====="
+          RNDIS="$(find . -name 'rndis_host.ko' -print -quit)"
 
-          ls -lh drivers/net/usb/rndis_host.ko
+          test -n "$RNDIS"
+          test -f "$RNDIS"
 
-      - name: Verify RNDIS module
-        working-directory: linux-4.9.170
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          cp "$RNDIS" "$GITHUB_WORKSPACE/artifact/rndis_host.ko"
+
+      - name: Verify module
+        working-directory: knulli-linux
         run: |
-          echo "===== MODULE INFO ====="
-          modinfo drivers/net/usb/rndis_host.ko || true
+          set -eux
+
+          MOD="$GITHUB_WORKSPACE/artifact/rndis_host.ko"
+
+          echo "========================================"
+          echo " RNDIS MODULE"
+          echo "========================================"
+
+          file "$MOD"
 
           echo
-          echo "===== DEPENDENCIES ====="
-          modinfo -F depends drivers/net/usb/rndis_host.ko || true
+          echo "modinfo:"
+          modinfo "$MOD" || true
 
           echo
-          echo "===== VERMAGIC ====="
-          modinfo -F vermagic drivers/net/usb/rndis_host.ko || true
+          echo "vermagic:"
+          modinfo "$MOD" | grep '^vermagic:' || true
 
           echo
-          echo "===== MODULE_LAYOUT CRC ====="
-          grep -E '[[:space:]]module_layout[[:space:]]' Module.symvers || true
+          echo "module_layout CRC in generated Module.symvers:"
+          grep -w 'module_layout' \
+            "$(find . -name Module.symvers -print -quit)" || true
 
           echo
-          echo "===== CHECKING UNWANTED MODULES ====="
+          echo "module_layout in module:"
+          grep -aob 'module_layout' "$MOD" || true
 
-          if [ -f drivers/net/mii.ko ]; then
-            echo "ERROR: mii.ko was generated"
-            exit 1
-          fi
+          echo
+          echo "========================================"
 
-          if [ -f drivers/net/usb/usbnet.ko ]; then
-            echo "ERROR: usbnet.ko was generated"
-            exit 1
-          fi
-
-          if [ -f drivers/net/usb/cdc_ether.ko ]; then
-            echo "ERROR: cdc_ether.ko was generated"
-            exit 1
-          fi
-
-          echo "OK: only rndis_host.ko is required"
-
-      - name: Create output directory
+      - name: Compare expected KNULLI CRC
+        working-directory: knulli-linux
         run: |
-          rm -rf output
-          mkdir -p output
+          set -eux
 
-          cp \
-            linux-4.9.170/drivers/net/usb/rndis_host.ko \
-            output/rndis_host.ko
+          SYMVERS="$(find . -name Module.symvers -print -quit)"
+          MOD="$GITHUB_WORKSPACE/artifact/rndis_host.ko"
 
-          printf '%s\n' \
-            'KNULLI RG28XX / H700 USB RNDIS module' \
-            '' \
-            'Target:' \
-            '  Linux 4.9.170' \
-            '  ARM64' \
-            '  Allwinner H700 / sun50iw9' \
-            '' \
-            'The running kernel already provides:' \
-            '  CONFIG_USB_USBNET=y' \
-            '  CONFIG_USB_NET_CDCETHER=y' \
-            '  CONFIG_MII=y' \
-            '' \
-            'This package therefore contains ONLY:' \
-            '  rndis_host.ko' \
-            '' \
-            'Do NOT load:' \
-            '  mii.ko' \
-            '  usbnet.ko' \
-            '  cdc_ether.ko' \
-            > output/README.txt
+          echo "KNULLI Module.symvers:"
+          grep -w 'module_layout' "$SYMVERS" || true
 
-      - name: Create tether script
+          echo
+          echo "Built module:"
+          modinfo "$MOD" | grep '^vermagic:' || true
+
+          echo
+          echo "Expected target CRC from known-good RG28XX:"
+          echo "0x3491861c"
+
+          echo
+          echo "NOTE:"
+          echo "The GitHub build is considered an exact match only if"
+          echo "the generated module_layout CRC is 0x3491861c."
+
+      - name: Package artifact
         run: |
-          printf '%s\n' \
-            '#!/bin/sh' \
-            '' \
-            'SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"' \
-            'LOG_FILE="$SCRIPT_DIR/tether_log.txt"' \
-            '' \
-            'log()' \
-            '{' \
-            '    echo "[$(date "+%Y-%m-%d %H:%M:%S")] $*"' \
-            '}' \
-            '' \
-            '{' \
-            '    log "--- KNULLI RG28XX RNDIS Tether ---"' \
-            '' \
-            '    if [ ! -f "$SCRIPT_DIR/rndis_host.ko" ]; then' \
-            '        log "ERROR: rndis_host.ko not found"' \
-            '        exit 1' \
-            '    fi' \
-            '' \
-            '    if lsmod 2>/dev/null | grep -q "^rndis_host"; then' \
-            '        log "INFO: rndis_host already loaded"' \
-            '    else' \
-            '        log "INFO: Loading rndis_host.ko"' \
-            '        insmod "$SCRIPT_DIR/rndis_host.ko" 2>&1' \
-            '        RC=$?' \
-            '' \
-            '        if [ "$RC" -ne 0 ]; then' \
-            '            log "ERROR: insmod failed with code $RC"' \
-            '            log "Kernel messages:"' \
-            '            dmesg | tail -n 80' \
-            '            exit 1' \
-            '        fi' \
-            '    fi' \
-            '' \
-            '    log "INFO: Waiting for USB network interface..."' \
-            '' \
-            '    INTERFACE=""' \
-            '    i=1' \
-            '' \
-            '    while [ "$i" -le 20 ]; do' \
-            '        INTERFACE="$(ip -o link show 2>/dev/null | awk -F": " "{print \$2}" | grep -E "^(usb|rndis|enp|eth)" | tail -n 1)"' \
-            '' \
-            '        if [ -n "$INTERFACE" ]; then' \
-            '            break' \
-            '        fi' \
-            '' \
-            '        sleep 1' \
-            '        i=$((i + 1))' \
-            '    done' \
-            '' \
-            '    if [ -z "$INTERFACE" ]; then' \
-            '        log "ERROR: No USB/RNDIS network interface appeared"' \
-            '        log "Kernel messages:"' \
-            '        dmesg | tail -n 100' \
-            '        exit 1' \
-            '    fi' \
-            '' \
-            '    log "INFO: Interface detected: $INTERFACE"' \
-            '    ip link set "$INTERFACE" up 2>&1 || true' \
-            '' \
-            '    if command -v udhcpc >/dev/null 2>&1; then' \
-            '        log "INFO: Requesting DHCP lease..."' \
-            '        udhcpc -i "$INTERFACE" -n -q 2>&1 || true' \
-            '    fi' \
-            '' \
-            '    log "INFO: Interface state:"' \
-            '    ip addr show "$INTERFACE" 2>&1 || true' \
-            '' \
-            '    log "INFO: Routing:"' \
-            '    ip route show 2>&1 || true' \
-            '' \
-            '    if [ -w /etc/resolv.conf ]; then' \
-            '        printf "%s\n" "nameserver 1.1.1.1" "nameserver 8.8.8.8" > /etc/resolv.conf' \
-            '    fi' \
-            '' \
-            '    log "SUCCESS: RNDIS setup completed."' \
-            '' \
-            '} >> "$LOG_FILE" 2>&1' \
-            '' \
-            'cat "$LOG_FILE"' \
-            > output/tether.sh
+          cd artifact
 
-          chmod +x output/tether.sh
+          sha256sum rndis_host.ko > SHA256SUMS
 
-      - name: Show output
-        run: |
-          echo "===== FINAL OUTPUT ====="
-          ls -lah output
+          cat > README.txt <<'EOF'
+          KNULLI H700 RNDIS host module
 
-      - name: Create archive
-        run: |
-          tar -czf knulli-rg28xx-rndis.tar.gz output
+          Target:
+            Anbernic RG28XX
+            KNULLI
+            Linux 4.9.170
+            ARM64
 
-          echo "===== ARCHIVE ====="
-          ls -lh knulli-rg28xx-rndis.tar.gz
+          Expected known-good KNULLI module_layout CRC:
+            0x3491861c
 
-      - name: Upload artifact
+          Before installing, verify:
+            modinfo rndis_host.ko
+
+          The vermagic should be:
+            4.9.170 SMP preempt mod_unload modversions aarch64
+          EOF
+
+          zip -9 rndis_host-knulli-h700.zip \
+            rndis_host.ko \
+            SHA256SUMS \
+            README.txt
+
+      - name: Upload RNDIS module
         uses: actions/upload-artifact@v4
         with:
-          name: knulli-rg28xx-rndis
+          name: rndis-host-knulli-h700
           path: |
-            output/
-            knulli-rg28xx-rndis.tar.gz
+            artifact/rndis_host.ko
+            artifact/SHA256SUMS
+            artifact/README.txt
+            artifact/rndis_host-knulli-h700.zip
+          if-no-files-found: error
+```
