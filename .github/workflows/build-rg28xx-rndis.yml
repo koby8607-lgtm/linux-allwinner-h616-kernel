@@ -38,37 +38,28 @@ jobs:
           wget -q -O .config \
             https://raw.githubusercontent.com/knulli-cfw/knulli-linux/knulli-main/board/allwinner/h700/linux-sunxi64-legacy.config
 
-          # The RG28XX kernel already has these built in.
-          CONFIG_USB_USBNET=y
-          CONFIG_USB_NET_CDCETHER=y
-          CONFIG_MII=y
-
           # RNDIS host is the missing driver.
           sed -i \
             's/^# CONFIG_USB_NET_RNDIS_HOST is not set$/CONFIG_USB_NET_RNDIS_HOST=m/' \
             .config
 
-          # Ensure the important ABI options match the running kernel.
+          # These are already built into the RG28XX kernel.
           sed -i 's/^CONFIG_USB_USBNET=.*/CONFIG_USB_USBNET=y/' .config
           sed -i 's/^CONFIG_USB_NET_CDCETHER=.*/CONFIG_USB_NET_CDCETHER=y/' .config
           sed -i 's/^CONFIG_MII=.*/CONFIG_MII=y/' .config
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=y/' .config
 
           # Linux 4.9.170 DTC compatibility fix.
-          sed -i \
-            's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' \
-            scripts/dtc/dtc-lexer.lex.c_shipped
+          if grep -q '^YYLTYPE yylloc;' scripts/dtc/dtc-lexer.lex.c_shipped; then
+            sed -i \
+              's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' \
+              scripts/dtc/dtc-lexer.lex.c_shipped
+          fi
 
-          make ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            olddefconfig
-
-          echo
-          echo "===== FINAL CONFIG ====="
-
+          echo "===== CONFIG BEFORE OLDDEFCONFIG ====="
           grep -E \
             'CONFIG_(MODULES|MODVERSIONS|MII|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST)=' \
-            .config
+            .config || true
 
       - name: Download KNULLI AArch64 SDK
         run: |
@@ -83,7 +74,6 @@ jobs:
       - name: Set KNULLI compiler
         run: |
           echo "CROSS=$GITHUB_WORKSPACE/aarch64-buildroot-linux-gnu_sdk-buildroot/bin/aarch64-buildroot-linux-gnu-" >> "$GITHUB_ENV"
-
           echo "$GITHUB_WORKSPACE/aarch64-buildroot-linux-gnu_sdk-buildroot/bin" >> "$GITHUB_PATH"
 
       - name: Show compiler
@@ -97,11 +87,17 @@ jobs:
             CROSS_COMPILE="$CROSS" \
             olddefconfig
 
+          echo "===== FINAL CONFIG ====="
+
+          grep -E \
+            'CONFIG_(MODULES|MODVERSIONS|MII|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST)=' \
+            .config || true
+
           make ARCH=arm64 \
             CROSS_COMPILE="$CROSS" \
             modules_prepare
 
-      - name: FULL kernel build - generate Module.symvers
+      - name: Build full kernel and generate Module.symvers
         working-directory: linux-4.9.170
         run: |
           echo "Building kernel so Module.symvers is generated..."
@@ -111,17 +107,18 @@ jobs:
             CROSS_COMPILE="$CROSS" \
             Image
 
-          echo
           echo "===== Module.symvers ====="
 
           test -s Module.symvers
 
           wc -l Module.symvers
 
+          echo "===== module_layout CRC ====="
+
           grep -E '[[:space:]]module_layout[[:space:]]' \
             Module.symvers || true
 
-      - name: Build ONLY rndis_host.ko
+      - name: Build RNDIS host module
         working-directory: linux-4.9.170
         run: |
           make -j"$(nproc)" \
@@ -130,7 +127,6 @@ jobs:
             M=drivers/net/usb \
             modules
 
-          echo
           echo "===== BUILT MODULE ====="
 
           test -f drivers/net/usb/rndis_host.ko
@@ -182,7 +178,7 @@ jobs:
 
           echo "OK: only rndis_host.ko is required."
 
-      - name: Create flat output
+      - name: Create output package
         run: |
           rm -rf output
           mkdir -p output
@@ -244,7 +240,7 @@ log()
             log "ERROR: insmod failed with code $RC"
             log "Kernel messages:"
             dmesg | tail -n 80
-            exit "$RC"
+            exit 1
         fi
     fi
 
@@ -255,7 +251,6 @@ log()
     i=1
 
     while [ "$i" -le 20 ]; do
-
         INTERFACE="$(
             ip -o link show 2>/dev/null |
             awk -F': ' '{print $2}' |
@@ -309,9 +304,7 @@ EOF
 
           chmod +x output/tether.sh
 
-          echo
           echo "===== FINAL OUTPUT ====="
-
           ls -lah output
 
       - name: Create archive
