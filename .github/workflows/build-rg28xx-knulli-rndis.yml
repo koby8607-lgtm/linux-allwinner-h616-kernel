@@ -1,0 +1,324 @@
+name: Build RG28XX KNULLI RNDIS host module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  KERNEL_VERSION: "4.9.170"
+  KERNEL_TARBALL: "https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.9.170.tar.gz"
+  KNULLI_CONFIG: "https://raw.githubusercontent.com/knulli-cfw/distribution/refs/heads/knulli-main/board/batocera/allwinner/h700/linux-sunxi64-legacy.config"
+
+jobs:
+  build:
+    name: RG28XX H700 RNDIS module
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libssl-dev \
+            libelf-dev \
+            pkg-config \
+            kmod \
+            xz-utils \
+            cpio \
+            file \
+            python3
+
+      - name: Download Linux 4.9.170
+        run: |
+          set -eux
+          wget -q "${KERNEL_TARBALL}" -O linux-4.9.170.tar.gz
+          tar -xzf linux-4.9.170.tar.gz
+          test -d linux-4.9.170
+
+      - name: Install KNULLI H700 kernel configuration
+        working-directory: linux-4.9.170
+        run: |
+          set -eux
+          wget -q "${KNULLI_CONFIG}" -O .config
+          test -s .config
+
+          echo "KNULLI baseline USB networking configuration:"
+          grep -E '^CONFIG_USB_USBNET=|^CONFIG_USB_NET_RNDIS_HOST=|^# CONFIG_USB_USBNET is not set$|^# CONFIG_USB_NET_RNDIS_HOST is not set$' .config || true
+
+      - name: Preserve usbnet and enable only missing RNDIS host support
+        working-directory: linux-4.9.170
+        run: |
+          set -eux
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path(".config")
+          s = p.read_text()
+
+          def get_state(key):
+              m = re.search(rf"^({re.escape(key)})=(y|m)$", s, re.MULTILINE)
+              if m:
+                  return m.group(2)
+              if re.search(rf"^# {re.escape(key)} is not set$", s, re.MULTILINE):
+                  return "n"
+              return "unknown"
+
+          def set_state(key, value):
+              global s
+              s = re.sub(
+                  rf"^{re.escape(key)}=(?:y|m)$",
+                  f"{key}={value}",
+                  s,
+                  flags=re.MULTILINE,
+              )
+              s = re.sub(
+                  rf"^# {re.escape(key)} is not set$",
+                  f"{key}={value}",
+                  s,
+                  flags=re.MULTILINE,
+              )
+              if not re.search(rf"^{re.escape(key)}=", s, re.MULTILINE):
+                  s += f"\n{key}={value}\n"
+
+          usbnet = get_state("CONFIG_USB_USBNET")
+          rndis = get_state("CONFIG_USB_NET_RNDIS_HOST")
+
+          print(f"Baseline CONFIG_USB_USBNET={usbnet}")
+          print(f"Baseline CONFIG_USB_NET_RNDIS_HOST={rndis}")
+
+          # IMPORTANT:
+          # Do not turn an existing built-in usbnet (y) into a module.
+          # Do not replace an existing usbnet module (m).
+          if usbnet not in {"y", "m"}:
+              print("usbnet is not enabled; enabling CONFIG_USB_USBNET=m")
+              set_state("CONFIG_USB_USBNET", "m")
+          else:
+              print(f"Preserving existing CONFIG_USB_USBNET={usbnet}")
+
+          # RNDIS host is the missing functionality we are targeting.
+          set_state("CONFIG_USB_NET_RNDIS_HOST", "m")
+
+          p.write_text(s)
+          PY
+
+          # Fix the known old 4.9.170 DTC lexer declaration issue used by
+          # the established KNULLI H700 module-build procedure.
+          sed -i \
+            's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/g' \
+            scripts/dtc/dtc-lexer.lex.c_shipped
+
+          make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" olddefconfig
+
+          echo
+          echo "Final USB networking configuration:"
+          grep -E '^CONFIG_USB_USBNET=|^CONFIG_USB_NET_RNDIS_HOST=|^CONFIG_USB_NET_CDCETHER=' .config || true
+
+          USBNET_STATE="$(
+            sed -nE 's/^CONFIG_USB_USBNET=(y|m)$/\1/p' .config
+          )"
+          RNDIS_STATE="$(
+            sed -nE 's/^CONFIG_USB_NET_RNDIS_HOST=(y|m)$/\1/p' .config
+          )"
+
+          test "${USBNET_STATE}" = "y" || test "${USBNET_STATE}" = "m"
+          test "${RNDIS_STATE}" = "m"
+
+      - name: Prepare module build
+        working-directory: linux-4.9.170
+        run: |
+          set -eux
+
+          make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" modules_prepare
+
+          grep -q '^CONFIG_MODULES=y$' .config
+          grep -q '^CONFIG_MODVERSIONS=y$' .config
+
+      - name: Build USB networking subsystem
+        working-directory: linux-4.9.170
+        run: |
+          set -eux
+
+          make -j"$(nproc)" \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            M=drivers/net/usb \
+            modules
+
+      - name: Verify and collect only required modules
+        run: |
+          set -eux
+
+          mkdir -p package/lib/modules/${KERNEL_VERSION}/kernel/drivers/net/usb
+
+          test -f linux-4.9.170/drivers/net/usb/rndis_host.ko
+
+          # Inspect the final configuration to decide whether usbnet is
+          # already built into KNULLI, is a module, or was added above.
+          USBNET_STATE="$(
+            sed -nE 's/^CONFIG_USB_USBNET=(y|m)$/\1/p' linux-4.9.170/.config
+          )"
+
+          echo "Final CONFIG_USB_USBNET=${USBNET_STATE}"
+
+          case "${USBNET_STATE}" in
+            y)
+              echo "usbnet is built into the kernel; package only rndis_host.ko"
+              cp \
+                linux-4.9.170/drivers/net/usb/rndis_host.ko \
+                package/lib/modules/${KERNEL_VERSION}/kernel/drivers/net/usb/
+              ;;
+            m)
+              echo "usbnet is a module; package usbnet.ko + rndis_host.ko"
+              test -f linux-4.9.170/drivers/net/usb/usbnet.ko
+              cp \
+                linux-4.9.170/drivers/net/usb/usbnet.ko \
+                linux-4.9.170/drivers/net/usb/rndis_host.ko \
+                package/lib/modules/${KERNEL_VERSION}/kernel/drivers/net/usb/
+              ;;
+            *)
+              echo "ERROR: unexpected CONFIG_USB_USBNET state: ${USBNET_STATE}"
+              exit 1
+              ;;
+          esac
+
+          # Strip debug sections only; keep module metadata and vermagic.
+          find package -name '*.ko' -exec \
+            aarch64-linux-gnu-strip --strip-debug {} \;
+
+          echo
+          echo "Final package contents:"
+          find package -type f -print | sort
+
+          echo
+          echo "Architecture checks:"
+          file package/lib/modules/${KERNEL_VERSION}/kernel/drivers/net/usb/*.ko
+
+      - name: Generate module dependency metadata
+        run: |
+          set -eux
+          depmod -b package "${KERNEL_VERSION}"
+
+          test -f package/lib/modules/${KERNEL_VERSION}/modules.dep
+          test -f package/lib/modules/${KERNEL_VERSION}/modules.alias
+
+          echo
+          echo "Generated dependencies:"
+          cat package/lib/modules/${KERNEL_VERSION}/modules.dep
+
+      - name: Create installer and README
+        run: |
+          set -eux
+
+          cat > package/install-rndis.sh <<'EOF'
+          #!/bin/sh
+          set -eu
+
+          EXPECTED_KERNEL="4.9.170"
+          SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          RUNNING_KERNEL="$(uname -r)"
+          DEST="/lib/modules/${RUNNING_KERNEL}"
+
+          echo "RG28XX / KNULLI RNDIS host module installer"
+          echo "Running kernel: ${RUNNING_KERNEL}"
+          echo "Expected kernel: ${EXPECTED_KERNEL}"
+
+          if [ "${RUNNING_KERNEL}" != "${EXPECTED_KERNEL}" ]; then
+              echo "ERROR: kernel version mismatch."
+              exit 1
+          fi
+
+          mkdir -p "${DEST}/kernel/drivers/net/usb"
+
+          cp "${SELF_DIR}/lib/modules/${EXPECTED_KERNEL}/kernel/drivers/net/usb/"*.ko \
+             "${DEST}/kernel/drivers/net/usb/"
+
+          # Rebuild dependency information using the target system's depmod.
+          depmod -a "${RUNNING_KERNEL}"
+
+          echo
+          echo "Loading RNDIS host support..."
+          modprobe rndis_host
+
+          echo
+          echo "Loaded modules:"
+          lsmod | grep -E '^(rndis_host|usbnet)' || true
+
+          echo
+          echo "Now enable USB tethering on the phone and check:"
+          echo "  ip link"
+          echo "  dmesg | tail -50"
+          EOF
+
+          chmod +x package/install-rndis.sh
+
+          cat > package/README.txt <<'EOF'
+          RG28XX KNULLI H700 RNDIS host module
+          =====================================
+
+          Target:
+            Anbernic RG28XX
+            KNULLI H700
+            Linux 4.9.170
+            ARM64
+
+          Purpose:
+            Add USB RNDIS host support for USB phone tethering.
+
+          This build deliberately preserves the KNULLI H700 configuration:
+            - If CONFIG_USB_USBNET=y, usbnet stays built into the kernel and
+              only rndis_host.ko is packaged.
+            - If CONFIG_USB_USBNET=m, usbnet.ko and rndis_host.ko are packaged.
+            - If CONFIG_USB_USBNET is disabled, usbnet is added as a module
+              because rndis_host requires it.
+
+          Main module:
+            rndis_host.ko
+
+          Do NOT use these modules with an unrelated kernel build.
+
+          Installation:
+            chmod +x install-rndis.sh
+            ./install-rndis.sh
+
+          Manual test:
+            modprobe rndis_host
+            ip link
+            dmesg | tail -50
+
+          After the phone is connected with USB tethering enabled, look for
+          a network interface such as usb0 or rndis0.
+          EOF
+
+      - name: Create release archive
+        run: |
+          set -eux
+
+          tar -C package -czf \
+            rg28xx-knulli-rndis-${KERNEL_VERSION}.tar.gz \
+            .
+
+          sha256sum \
+            rg28xx-knulli-rndis-${KERNEL_VERSION}.tar.gz \
+            > rg28xx-knulli-rndis-${KERNEL_VERSION}.sha256
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rg28xx-knulli-rndis-4.9.170
+          if-no-files-found: error
+          path: |
+            rg28xx-knulli-rndis-4.9.170.tar.gz
+            rg28xx-knulli-rndis-4.9.170.sha256
+            package/
