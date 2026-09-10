@@ -1,0 +1,167 @@
+name: Build Patched KNULLI H700 Kernel Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout GitHub Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git libc6-dev python3
+
+      - name: Fetch H700 Kernel Source
+        run: |
+          git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
+
+      - name: Patch cdc_ether.c via Python Script
+        run: |
+          python3 - << 'PY'
+          from pathlib import Path
+
+          file_path = Path("kernel_source/drivers/net/usb/cdc_ether.c")
+          s = file_path.read_text()
+
+          if "android_rndis_quirk" in s:
+              print("cdc_ether.c is already patched.")
+              exit(0)
+
+          # 1. Add android_rndis_quirk declaration
+          old_decl = "int\t\t\t\trndis;\n\tstruct usb_driver\t\t*driver = driver_of(intf);"
+          new_decl = "int\t\t\t\trndis;\n\tbool\t\t\t\tandroid_rndis_quirk = false;\n\tstruct usb_driver\t\t*driver = driver_of(intf);"
+
+          if old_decl not in s:
+              print("ERROR: Variable declaration block not found!")
+              exit(1)
+          s = s.replace(old_decl, new_decl, 1)
+
+          # 2. Patch bind function for Unisoc/Android RNDIS fallback & ACM capabilities check
+          old_bind = """\tinfo->control = usb_ifnum_to_if(dev->udev,
+\t\t\tinfo->u->bMasterInterface0);
+\tinfo->data = usb_ifnum_to_if(dev->udev,
+\t\t\tinfo->u->bSlaveInterface0);
+\tif (!info->control || !info->data) {
+\t\tdev_dbg(&intf->dev,
+\t\t\t"master #%u/%p slave #%u/%p\\n",
+\t\t\tinfo->u->bMasterInterface0,
+\t\t\tinfo->control,
+\t\t\tinfo->u->bSlaveInterface0,
+\t\t\tinfo->data);
+\t\tgoto bad_desc;
+\t}"""
+
+          new_bind = """\tinfo->control = usb_ifnum_to_if(dev->udev,
+\t\t\tinfo->u->bMasterInterface0);
+\tinfo->data = usb_ifnum_to_if(dev->udev,
+\t\t\tinfo->u->bSlaveInterface0);
+\tif (!info->control || !info->data) {
+\t\tdev_dbg(&intf->dev,
+\t\t\t"master #%u/%p slave #%u/%p\\n",
+\t\t\tinfo->u->bMasterInterface0,
+\t\t\tinfo->control,
+\t\t\tinfo->u->bSlaveInterface0,
+\t\t\tinfo->data);
+\t\tif (rndis) {
+\t\t\tandroid_rndis_quirk = true;
+\t\t\tgoto skip;
+\t\t}
+\t\tgoto bad_desc;
+\t}"""
+
+          if old_bind not in s:
+              print("ERROR: Bind interface block not found!")
+              exit(1)
+          s = s.replace(old_bind, new_bind, 1)
+
+          # 3. Add Android RNDIS Interface 0/1 fallback logic in skip section
+          old_skip = "skip:\n\tif (!info->header || (!rndis && !info->ether)) {"
+          new_skip = """skip:
+\tif (rndis && is_rndis(&intf->cur_altsetting->desc) &&
+\t    header.usb_cdc_acm_descriptor &&
+\t    header.usb_cdc_acm_descriptor->bmCapabilities) {
+\t\tdev_dbg(&intf->dev,
+\t\t\t"ACM capabilities %02x, not really RNDIS?\\n",
+\t\t\theader.usb_cdc_acm_descriptor->bmCapabilities);
+\t\tgoto bad_desc;
+\t}
+
+\tif (rndis && (!info->u || android_rndis_quirk)) {
+\t\tinfo->control = usb_ifnum_to_if(dev->udev, 0);
+\t\tinfo->data = usb_ifnum_to_if(dev->udev, 1);
+\t\tif (!info->control || !info->data || info->control != intf) {
+\t\t\tdev_err(&intf->dev,
+\t\t\t\t"rndis: master #0/%p slave #1/%p\\n",
+\t\t\t\tinfo->control, info->data);
+\t\t\tgoto bad_desc;
+\t\t}
+\t}
+
+\tif (!info->header || (!rndis && !info->ether)) {"""
+
+          if old_skip not in s:
+              print("ERROR: Skip block not found!")
+              exit(1)
+          s = s.replace(old_skip, new_skip, 1)
+
+          file_path.write_text(s)
+          print("Successfully patched kernel source: drivers/net/usb/cdc_ether.c")
+          PY
+
+      - name: Configure Kernel Tree
+        run: |
+          cd kernel_source
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          # Load default Sun50i H700 board config
+          CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
+          cp "$CONFIG_PATH" .config
+
+          echo "" > .scmversion
+          scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
+          scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
+
+          # Enable built-in USB networking drivers with the patch applied
+          scripts/config --file .config --enable CONFIG_NETDEVICES
+          scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
+          scripts/config --file .config --enable CONFIG_USB_USBNET
+          scripts/config --file .config --enable CONFIG_USB_NET_CDCETHER
+          scripts/config --file .config --enable CONFIG_USB_NET_RNDIS_HOST
+          scripts/config --file .config --enable CONFIG_MII
+
+          make ARCH=arm64 olddefconfig
+
+          # Build host tools serially (-j1) to prevent genksyms race conditions
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j1
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j1
+
+      - name: Compile Patched Kernel Image
+        run: |
+          cd kernel_source
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          make ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTCFLAGS="-w" \
+            KCFLAGS="-w" \
+            LOCALVERSION="" \
+            Image -j$(nproc)
+
+      - name: Collect & Package Kernel Artifact
+        run: |
+          mkdir output
+          cp kernel_source/arch/arm64/boot/Image output/
+          ls -lh output/
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: knulli-patched-kernel-image
+          path: output/Image
