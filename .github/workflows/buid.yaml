@@ -78,17 +78,17 @@ jobs:
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enable CDC Ether as a loadable module (.ko)
+          # Enable core networking and set USB drivers to modules
           scripts/config --file .config --enable CONFIG_NETDEVICES
           scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
-          scripts/config --file .config --enable CONFIG_USB_USBNET
+          scripts/config --file .config --module CONFIG_USB_USBNET
           scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
           scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
           scripts/config --file .config --enable CONFIG_MII
 
           make ARCH=arm64 olddefconfig
 
-          # Prepare toolchain headers (Standard Linux 4.9 preparation steps)
+          # Prepare headers and symbol tables
           make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j1
           make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j1
 
@@ -98,18 +98,26 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Build only the drivers/net/usb target
+          # Build all modules configured as =m (fast, compiles usbnet & cdc_ether)
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCFLAGS="-w" \
             KCFLAGS="-w" \
-            M=drivers/net/usb modules -j$(nproc)
+            modules -j$(nproc)
 
       - name: Package Module Artifact
         run: |
           mkdir output
-          cp kernel_source/drivers/net/usb/cdc_ether.ko output/
-          ls -lh output/
+          # Search tree for generated cdc_ether.ko and copy
+          FOUND_MODULE=$(find kernel_source/ -name "cdc_ether.ko" | head -n 1)
+          if [ -n "$FOUND_MODULE" ]; then
+            cp "$FOUND_MODULE" output/
+            echo "Successfully packaged: $FOUND_MODULE"
+            ls -lh output/
+          else
+            echo "ERROR: cdc_ether.ko was not produced by the build!"
+            exit 1
+          fi
 
       - name: Upload cdc_ether.ko Artifact
         uses: actions/upload-artifact@v4
