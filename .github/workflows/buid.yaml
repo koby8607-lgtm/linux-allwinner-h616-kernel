@@ -18,7 +18,6 @@ jobs:
 
       - name: Fetch KNULLI-Matched H700 Kernel Source
         run: |
-          # Fetch the exact Linux 4.9.170 kernel tree used by KNULLI H700 builds
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
       - name: Patch cdc_ether.c for Android/Unisoc RNDIS
@@ -66,7 +65,7 @@ jobs:
           print("Successfully patched kernel source: drivers/net/usb/cdc_ether.c")
           '
 
-      - name: Prepare Headers & Module Build Tree
+      - name: Prepare Kernel Headers & Configuration
         run: |
           cd kernel_source
           export ARCH=arm64
@@ -79,7 +78,7 @@ jobs:
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enable CDC Ether as a loadable module
+          # Enable CDC Ether as a loadable module (.ko)
           scripts/config --file .config --enable CONFIG_NETDEVICES
           scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
           scripts/config --file .config --enable CONFIG_USB_USBNET
@@ -89,22 +88,22 @@ jobs:
 
           make ARCH=arm64 olddefconfig
 
-          # Prepare kernel module headers without compiling full kernel Image
-          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" modules_prepare -j$(nproc)
+          # Prepare toolchain headers (Standard Linux 4.9 preparation steps)
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j1
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j1
 
-      - name: Compile Patched cdc_ether.ko
+      - name: Compile cdc_ether.ko Module
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Target drivers/net/usb directory specifically
+          # Build only the drivers/net/usb target
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCFLAGS="-w" \
             KCFLAGS="-w" \
-            M=drivers/net/usb \
-            modules -j$(nproc)
+            M=drivers/net/usb modules -j$(nproc)
 
       - name: Package Module Artifact
         run: |
