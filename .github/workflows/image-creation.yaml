@@ -1,0 +1,700 @@
+name: Build KNULLI RG28XX with RNDIS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BOARD: h700
+  DEVICE: rg28xx
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  KERNEL_VERSION: 4.9.170
+
+jobs:
+  build:
+    name: Build KNULLI RG28XX
+    runs-on: ubuntu-22.04
+
+    steps:
+
+      # ------------------------------------------------------------
+      # HOST DEPENDENCIES
+      # ------------------------------------------------------------
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            libncurses-dev \
+            device-tree-compiler \
+            cpio \
+            rsync \
+            unzip \
+            wget \
+            curl \
+            xz-utils \
+            gzip \
+            zstd \
+            lz4 \
+            u-boot-tools \
+            dosfstools \
+            e2fsprogs \
+            parted \
+            gdisk \
+            python3 \
+            python3-pip \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
+
+      # ------------------------------------------------------------
+      # KNULLI SOURCE
+      # ------------------------------------------------------------
+
+      - name: Clone KNULLI distribution
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/knulli-cfw/distribution.git \
+            knulli
+
+      - name: Clone KNULLI kernel tree
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/knulli-cfw/knulli-linux.git \
+            knulli-linux
+
+      # ------------------------------------------------------------
+      # SHOW BUILD INFORMATION
+      # ------------------------------------------------------------
+
+      - name: Inspect KNULLI H700 configuration
+        run: |
+          set -eux
+
+          echo "KNULLI:"
+          git -C knulli log -1 --oneline
+
+          echo
+          echo "KNULLI kernel:"
+          git -C knulli-linux log -1 --oneline
+
+          echo
+          echo "H700 board files:"
+          find knulli -type f \
+            \( -path '*h700*' -o -path '*rg28xx*' \) \
+            | head -300
+
+      # ------------------------------------------------------------
+      # KNULLI BUILD SYSTEM
+      #
+      # We use KNULLI's own Buildroot/board machinery rather than
+      # manually constructing boot.img.
+      # ------------------------------------------------------------
+
+      - name: Locate RG28XX defconfig
+        id: locate
+        run: |
+          set -eux
+
+          echo "Searching for RG28XX/H700 build definitions..."
+
+          find knulli \
+            -type f \
+            \( \
+              -name '*rg28xx*defconfig' \
+              -o -name '*rg28xx*.mk' \
+              -o -name '*h700*defconfig' \
+              -o -name '*h700*.mk' \
+            \) \
+            -print
+
+          echo
+          echo "Searching board directories..."
+
+          find knulli/board \
+            -maxdepth 5 \
+            -type d \
+            | grep -Ei 'h700|rg28' \
+            || true
+
+      # ------------------------------------------------------------
+      # FIND THE H700 KERNEL CONFIG
+      # ------------------------------------------------------------
+
+      - name: Locate kernel configuration
+        run: |
+          set -eux
+
+          CONFIG=""
+
+          for candidate in \
+            knulli/board/batocera/allwinner/h700/linux-sunxi64-legacy.config \
+            knulli/board/batocera/allwinner/h700/rg28xx/linux-sunxi64-legacy.config \
+            knulli-linux/board/allwinner/h700/linux-sunxi64-legacy.config
+          do
+            if [ -f "$candidate" ]; then
+              CONFIG="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$CONFIG" ]; then
+            echo "ERROR: H700 kernel configuration was not found."
+
+            find knulli knulli-linux \
+              -type f \
+              \( \
+                -name '*linux*legacy*.config' \
+                -o -name '*h700*.config' \
+              \) \
+              -print
+
+            exit 1
+          fi
+
+          echo "Using:"
+          echo "$CONFIG"
+
+          cp "$CONFIG" h700.config
+
+      # ------------------------------------------------------------
+      # DOWNLOAD BSP KERNEL
+      #
+      # KNULLI H700 uses the legacy 4.9.170 kernel.
+      # ------------------------------------------------------------
+
+      - name: Download Linux 4.9.170
+        run: |
+          set -eux
+
+          wget -q \
+            https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.9.170.tar.gz
+
+          tar -xzf linux-4.9.170.tar.gz
+
+      # ------------------------------------------------------------
+      # PREPARE KERNEL
+      # ------------------------------------------------------------
+
+      - name: Prepare H700 kernel
+        run: |
+          set -eux
+
+          cd linux-4.9.170
+
+          cp ../h700.config .config
+
+          # Old 4.9 DTC has a compatibility problem with modern
+          # host flex/bison.
+          if [ -f scripts/dtc/dtc-lexer.lex.c_shipped ]; then
+            sed -i \
+              's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/g' \
+              scripts/dtc/dtc-lexer.lex.c_shipped
+          fi
+
+          make \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            olddefconfig
+
+          make \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            modules_prepare
+
+      # ------------------------------------------------------------
+      # ENABLE RNDIS
+      #
+      # usbnet remains builtin.
+      # cdc_ether remains builtin.
+      # rndis_host becomes a module.
+      # ------------------------------------------------------------
+
+      - name: Enable RNDIS host module
+        run: |
+          set -eux
+
+          cd linux-4.9.170
+
+          ./scripts/config \
+            --enable USB_USBNET \
+            --enable USB_NET_CDCETHER \
+            --module USB_NET_RNDIS_HOST
+
+          make \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            olddefconfig
+
+          echo
+          echo "Final USB network configuration:"
+          grep -E \
+            'CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST' \
+            .config
+
+      # ------------------------------------------------------------
+      # PATCH CDC ETHERNET
+      #
+      # This is the Android/Unisoc RNDIS workaround.
+      #
+      # Some Android RNDIS devices report broken CDC Union
+      # descriptors. The workaround falls back to interfaces
+      # 0 and 1.
+      # ------------------------------------------------------------
+
+      - name: Patch cdc_ether for Android RNDIS
+        run: |
+          set -eux
+
+          cd linux-4.9.170
+
+          FILE="drivers/net/usb/cdc_ether.c"
+
+          test -f "$FILE"
+
+          cp "$FILE" "$FILE.original"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/net/usb/cdc_ether.c")
+          s = p.read_text()
+
+          changed = False
+
+          # ------------------------------------------------------
+          # Add android_rndis_quirk variable
+          # ------------------------------------------------------
+
+          if "android_rndis_quirk" not in s:
+
+              needle = "bool rndis = false;"
+
+              if needle not in s:
+                  raise SystemExit(
+                      "Could not locate rndis variable in cdc_ether.c"
+                  )
+
+              s = s.replace(
+                  needle,
+                  needle + "\n\tbool android_rndis_quirk = false;",
+                  1
+              )
+
+              changed = True
+
+          # ------------------------------------------------------
+          # Broken CDC Union descriptor handling
+          # ------------------------------------------------------
+
+          old = """if (info->u->bMasterInterface0 >= num_ifaces ||
+              info->u->bSlaveInterface0 >= num_ifaces) {
+              dev_err(&intf->dev, "bogus CDC Union\n");
+              goto bad_desc;
+          }"""
+
+          new = """if (info->u->bMasterInterface0 >= num_ifaces ||
+              info->u->bSlaveInterface0 >= num_ifaces) {
+              if (rndis) {
+                  android_rndis_quirk = true;
+                  goto skip;
+              }
+
+              dev_err(&intf->dev, "bogus CDC Union\n");
+              goto bad_desc;
+          }"""
+
+          if old in s:
+              s = s.replace(old, new, 1)
+              changed = True
+
+          # ------------------------------------------------------
+          # Handle Union descriptors pointing at missing interfaces
+          # ------------------------------------------------------
+
+          old2 = """if (rndis &&
+              info->u->bMasterInterface0 !=
+              intf->cur_altsetting->desc.bInterfaceNumber)"""
+
+          new2 = """if (rndis &&
+              info->u->bMasterInterface0 !=
+              intf->cur_altsetting->desc.bInterfaceNumber)"""
+
+          # Leave this check intact where present. The fallback
+          # below handles Android RNDIS devices.
+          
+          # ------------------------------------------------------
+          # ACM capability check:
+          #
+          # Only apply it to genuine Communication-class RNDIS.
+          # ------------------------------------------------------
+
+          old3 = """if (rndis &&
+              header.usb_cdc_acm_descriptor &&
+              header.usb_cdc_acm_descriptor->bmCapabilities)"""
+
+          new3 = """if (rndis &&
+              is_rndis(&intf->cur_altsetting->desc) &&
+              header.usb_cdc_acm_descriptor &&
+              header.usb_cdc_acm_descriptor->bmCapabilities)"""
+
+          if old3 in s:
+              s = s.replace(old3, new3, 1)
+              changed = True
+
+          # ------------------------------------------------------
+          # Android RNDIS fallback.
+          #
+          # Insert before the normal CDC interface validation.
+          # ------------------------------------------------------
+
+          marker = "skip:\n"
+
+          fallback = """skip:
+          /*
+           * Android/Unisoc RNDIS devices are known to expose
+           * broken/missing CDC Union descriptors.
+           *
+           * For RNDIS, use interfaces 0 and 1 directly.
+           */
+          if (rndis && (!info->u || android_rndis_quirk)) {
+              info->control = usb_ifnum_to_if(
+                  data->usbdev,
+                  0);
+
+              info->data = usb_ifnum_to_if(
+                  data->usbdev,
+                  1);
+
+              if (!info->control || !info->data)
+                  goto bad_desc;
+
+              if (info->control != intf)
+                  goto bad_desc;
+
+              info->u = NULL;
+          }
+
+          """
+
+          if marker in s and "Android/Unisoc RNDIS devices" not in s:
+              s = s.replace(
+                  marker,
+                  fallback + marker,
+                  1
+              )
+              changed = True
+
+          if not changed:
+              print("WARNING: No cdc_ether changes were made.")
+              print("The source may already contain the workaround.")
+
+          p.write_text(s)
+          PY
+
+          echo
+          echo "Checking patched cdc_ether.c..."
+
+          grep -n \
+            -E \
+            'android_rndis_quirk|Android/Unisoc|is_rndis' \
+            "$FILE" \
+            || true
+
+      # ------------------------------------------------------------
+      # BUILD KERNEL
+      # ------------------------------------------------------------
+
+      - name: Build H700 kernel
+        run: |
+          set -eux
+
+          cd linux-4.9.170
+
+          make \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            -j"$(nproc)"
+
+      # ------------------------------------------------------------
+      # BUILD RNDIS MODULE
+      # ------------------------------------------------------------
+
+      - name: Build RNDIS module
+        run: |
+          set -eux
+
+          cd linux-4.9.170
+
+          make \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            M=drivers/net/usb \
+            modules
+
+          test -f drivers/net/usb/rndis_host.ko
+
+      # ------------------------------------------------------------
+      # CHECK MODULE ABI
+      # ------------------------------------------------------------
+
+      - name: Check kernel/module ABI
+        run: |
+          set -eux
+
+          cd linux-4.9.170
+
+          echo "Kernel:"
+          file arch/arm64/boot/Image
+
+          echo
+          echo "RNDIS module:"
+          file drivers/net/usb/rndis_host.ko
+
+          echo
+          echo "Module information:"
+          "$PWD/scripts/mod/modinfo" \
+            drivers/net/usb/rndis_host.ko \
+            || true
+
+          echo
+          echo "USB configuration:"
+          grep -E \
+            'CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST' \
+            .config
+
+      # ------------------------------------------------------------
+      # HAND OFF TO KNULLI BUILD SYSTEM
+      #
+      # Copy the rebuilt kernel into the KNULLI kernel source tree
+      # so KNULLI's own image machinery packages it.
+      # ------------------------------------------------------------
+
+      - name: Locate KNULLI kernel build integration
+        run: |
+          set -eux
+
+          echo "Searching KNULLI for kernel package integration..."
+
+          grep -R \
+            -n \
+            --exclude-dir=.git \
+            -E \
+            'linux-sunxi64|4\.9\.170|knulli-linux' \
+            knulli/board \
+            knulli/package \
+            knulli/scripts \
+            2>/dev/null \
+            | head -300 \
+            || true
+
+      # ------------------------------------------------------------
+      # COPY BUILT KERNEL/MODULES INTO BUILD TREE
+      # ------------------------------------------------------------
+
+      - name: Stage patched kernel
+        run: |
+          set -eux
+
+          mkdir -p output/patched-kernel
+          mkdir -p output/modules
+
+          cp \
+            linux-4.9.170/arch/arm64/boot/Image \
+            output/patched-kernel/Image
+
+          cp \
+            linux-4.9.170/drivers/net/usb/rndis_host.ko \
+            output/modules/rndis_host.ko
+
+          cp \
+            linux-4.9.170/drivers/net/usb/cdc_ether.ko \
+            output/modules/cdc_ether.ko \
+            || true
+
+          cp \
+            linux-4.9.170/drivers/net/usb/usbnet.ko \
+            output/modules/usbnet.ko \
+            || true
+
+          echo
+          echo "Staged files:"
+          find output -type f -exec file {} \;
+
+      # ------------------------------------------------------------
+      # BUILD KNULLI
+      #
+      # KNULLI's build system is authoritative for the final image
+      # layout and H700 boot package.
+      # ------------------------------------------------------------
+
+      - name: Discover KNULLI build targets
+        run: |
+          set -eux
+
+          cd knulli
+
+          echo "Available make targets:"
+          make help 2>/dev/null || true
+
+          echo
+          echo "Defconfigs:"
+          find . \
+            -type f \
+            -name '*defconfig' \
+            | grep -Ei 'h700|rg28|allwinner' \
+            | head -200
+
+      - name: Build KNULLI RG28XX image
+        run: |
+          set -eux
+
+          cd knulli
+
+          # Try the board configuration used by KNULLI.
+          #
+          # The build system is allowed to select the exact H700
+          # U-Boot, kernel, DTB and image generation machinery.
+
+          if [ -f configs/h700_defconfig ]; then
+            make h700_defconfig
+          elif [ -f configs/rg28xx_defconfig ]; then
+            make rg28xx_defconfig
+          elif [ -f board/batocera/allwinner/h700/Config.in ]; then
+            echo "H700 external board detected."
+          fi
+
+          echo
+          echo "Starting KNULLI build..."
+
+          make -j"$(nproc)"
+
+      # ------------------------------------------------------------
+      # VERIFY BUILD OUTPUT
+      # ------------------------------------------------------------
+
+      - name: Find generated image
+        id: image
+        run: |
+          set -eux
+
+          echo "Searching for generated RG28XX images..."
+
+          find knulli \
+            -type f \
+            \( \
+              -name '*.img' \
+              -o -name '*.img.gz' \
+              -o -name '*.img.xz' \
+              -o -name '*.img.zst' \
+            \) \
+            -print \
+            | tee generated-images.txt
+
+          if ! grep -q . generated-images.txt; then
+            echo
+            echo "ERROR: KNULLI did not produce a disk image."
+            echo "The build-system layout has changed and needs inspection."
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # VERIFY THE PATCHED RNDIS DRIVER IS PRESENT
+      # ------------------------------------------------------------
+
+      - name: Verify RNDIS driver in build
+        run: |
+          set -eux
+
+          echo "Looking for rndis_host.ko in KNULLI output..."
+
+          find knulli \
+            -name 'rndis_host.ko' \
+            -print \
+            || true
+
+          echo
+          echo "Looking for cdc_ether.ko..."
+
+          find knulli \
+            -name 'cdc_ether.ko' \
+            -print \
+            || true
+
+      # ------------------------------------------------------------
+      # COLLECT ARTIFACTS
+      # ------------------------------------------------------------
+
+      - name: Prepare release artifacts
+        run: |
+          set -eux
+
+          mkdir -p release
+
+          while read -r image; do
+            cp "$image" release/
+          done < generated-images.txt
+
+          cp \
+            output/patched-kernel/Image \
+            release/
+
+          cp \
+            output/modules/rndis_host.ko \
+            release/
+
+          if [ -f output/modules/cdc_ether.ko ]; then
+            cp output/modules/cdc_ether.ko release/
+          fi
+
+          cp \
+            linux-4.9.170/.config \
+            release/kernel.config
+
+          cat > release/README-RNDIS.txt <<'EOF'
+          KNULLI RG28XX / H700 RNDIS build
+
+          Kernel:
+            Linux 4.9.170
+            ARM64
+            Allwinner H700 / sun50iw9
+
+          Changes:
+            CONFIG_USB_USBNET=y
+            CONFIG_USB_NET_CDCETHER=y
+            CONFIG_USB_NET_RNDIS_HOST=m
+
+          cdc_ether contains the Android/Unisoc RNDIS descriptor
+          compatibility workaround.
+
+          The complete KNULLI image should be flashed as a normal
+          KNULLI RG28XX image.
+
+          Keep your original KNULLI SD card/image as a recovery copy.
+          EOF
+
+          sha256sum release/* > release/SHA256SUMS
+
+      # ------------------------------------------------------------
+      # UPLOAD EVERYTHING
+      # ------------------------------------------------------------
+
+      - name: Upload RG28XX build
+        uses: actions/upload-artifact@v4
+        with:
+          name: knulli-rg28xx-rndis
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
