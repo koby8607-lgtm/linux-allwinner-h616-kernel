@@ -16,54 +16,85 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git libc6-dev python3
 
-      - name: Fetch H700 Kernel Source
+      - name: Fetch Official KNULLI Kernel Source
         run: |
+          # Fetch the H700 kernel tree targeted by KNULLI
+          git clone --depth 1 -b master https://github.com/knulli-cfw/knulli-linux.git knulli_repo || \
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
+
+          if [ -d "knulli_repo/board/batocera/allwinner/h700/linux" ]; then
+            echo "KNULLI buildroot board directory located."
+          fi
+
+          # Clone the clean kernel source matching KNULLI's target
+          if [ ! -d "kernel_source" ]; then
+            git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
+          fi
 
       - name: Patch cdc_ether.c via Python Script
         run: |
           python3 -c '
           from pathlib import Path
+          import sys
 
           file_path = Path("kernel_source/drivers/net/usb/cdc_ether.c")
           s = file_path.read_text()
 
           if "android_rndis_quirk" in s:
               print("cdc_ether.c is already patched.")
-              exit(0)
+              sys.exit(0)
 
-          # 1. Add variable declaration
-          s = s.replace("int\t\t\t\trndis;\n", "int\t\t\t\trndis;\n\tbool\t\t\t\tandroid_rndis_quirk = false;\n", 1)
+          # 1. Add android_rndis_quirk declaration
+          old_decl = "int\t\t\t\trndis;\n\tstruct usb_driver\t\t*driver = driver_of(intf);"
+          new_decl = "int\t\t\t\trndis;\n\tbool\t\t\t\tandroid_rndis_quirk = false;\n\tstruct usb_driver\t\t*driver = driver_of(intf);"
 
-          # 2. Add fallback trigger in CDC bind check
-          old_bind = "goto bad_desc;\n\t}\n\tif (info->control != intf) {"
-          new_bind = "if (rndis) {\n\t\t\tandroid_rndis_quirk = true;\n\t\t\tgoto skip;\n\t\t}\n\t\tgoto bad_desc;\n\t}\n\tif (info->control != intf) {"
+          if old_decl not in s:
+              print("ERROR: Variable declaration block not found!")
+              sys.exit(1)
+          s = s.replace(old_decl, new_decl, 1)
+
+          # 2. Patch bind function for Unisoc/Android RNDIS fallback
+          old_bind = "\tinfo->control = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bMasterInterface0);\n\tinfo->data = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bSlaveInterface0);\n\tif (!info->control || !info->data) {\n\t\tdev_dbg(&intf->dev,\n\t\t\t\"master #%u/%p slave #%u/%p\\n\",\n\t\t\tinfo->u->bMasterInterface0,\n\t\t\tinfo->control,\n\t\t\tinfo->u->bSlaveInterface0,\n\t\t\tinfo->data);\n\t\tgoto bad_desc;\n\t}"
+
+          new_bind = "\tinfo->control = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bMasterInterface0);\n\tinfo->data = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bSlaveInterface0);\n\tif (!info->control || !info->data) {\n\t\tdev_dbg(&intf->dev,\n\t\t\t\"master #%u/%p slave #%u/%p\\n\",\n\t\t\tinfo->u->bMasterInterface0,\n\t\t\tinfo->control,\n\t\t\tinfo->u->bSlaveInterface0,\n\t\t\tinfo->data);\n\t\tif (rndis) {\n\t\t\tandroid_rndis_quirk = true;\n\t\t\tgoto skip;\n\t\t}\n\t\tgoto bad_desc;\n\t}"
+
+          if old_bind not in s:
+              print("ERROR: Bind interface block not found!")
+              sys.exit(1)
           s = s.replace(old_bind, new_bind, 1)
 
-          # 3. Add Android RNDIS interface 0/1 fallback logic in skip section
+          # 3. Add Android RNDIS Interface 0/1 fallback logic in skip section
           old_skip = "skip:\n\tif (!info->header || (!rndis && !info->ether)) {"
-          new_skip = "skip:\n\tif (rndis && is_rndis(&intf->cur_altsetting->desc) && header.usb_cdc_acm_descriptor && header.usb_cdc_acm_descriptor->bmCapabilities) {\n\t\tdev_dbg(&intf->dev, \"ACM capabilities %02x, not really RNDIS?\\n\", header.usb_cdc_acm_descriptor->bmCapabilities);\n\t\tgoto bad_desc;\n\t}\n\tif (rndis && (!info->u || android_rndis_quirk)) {\n\t\tinfo->control = usb_ifnum_to_if(dev->udev, 0);\n\t\tinfo->data = usb_ifnum_to_if(dev->udev, 1);\n\t\tif (!info->control || !info->data || info->control != intf) {\n\t\t\tdev_err(&intf->dev, \"rndis: master #0/%p slave #1/%p\\n\", info->control, info->data);\n\t\t\tgoto bad_desc;\n\t\t}\n\t}\n\tif (!info->header || (!rndis && !info->ether)) {"
+          new_skip = "skip:\n\tif (rndis && is_rndis(&intf->cur_altsetting->desc) &&\n\t    header.usb_cdc_acm_descriptor &&\n\t    header.usb_cdc_acm_descriptor->bmCapabilities) {\n\t\tdev_dbg(&intf->dev,\n\t\t\t\"ACM capabilities %02x, not really RNDIS?\\n\",\n\t\t\theader.usb_cdc_acm_descriptor->bmCapabilities);\n\t\tgoto bad_desc;\n\t}\n\n\tif (rndis && (!info->u || android_rndis_quirk)) {\n\t\tinfo->control = usb_ifnum_to_if(dev->udev, 0);\n\t\tinfo->data = usb_ifnum_to_if(dev->udev, 1);\n\t\tif (!info->control || !info->data || info->control != intf) {\n\t\t\tdev_err(&intf->dev,\n\t\t\t\t\"rndis: master #0/%p slave #1/%p\\n\",\n\t\t\t\tinfo->control, info->data);\n\t\t\tgoto bad_desc;\n\t\t}\n\t}\n\n\tif (!info->header || (!rndis && !info->ether)) {"
+
+          if old_skip not in s:
+              print("ERROR: Skip block not found!")
+              sys.exit(1)
           s = s.replace(old_skip, new_skip, 1)
 
           file_path.write_text(s)
           print("Successfully patched kernel source: drivers/net/usb/cdc_ether.c")
           '
 
-      - name: Configure Kernel Tree
+      - name: Configure Kernel Tree (Defconfig Matching KNULLI)
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Load default Sun50i H700 board config
-          CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
-          cp "$CONFIG_PATH" .config
+          # Find Allwinner sun50iw9/H700 defconfig used by KNULLI board specs
+          if [ -f "arch/arm64/configs/sun50iw9p1_defconfig" ]; then
+            cp arch/arm64/configs/sun50iw9p1_defconfig .config
+          else
+            CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
+            cp "$CONFIG_PATH" .config
+          fi
 
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enable built-in USB networking drivers
+          # Enable RNDIS USB Networking Drivers
           scripts/config --file .config --enable CONFIG_NETDEVICES
           scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
           scripts/config --file .config --enable CONFIG_USB_USBNET
@@ -73,11 +104,11 @@ jobs:
 
           make ARCH=arm64 olddefconfig
 
-          # Build host tools serially (-j1) to prevent genksyms race conditions
+          # Prepare toolchain headers
           make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j1
           make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j1
 
-      - name: Compile Patched Kernel Image
+      - name: Compile KNULLI Kernel Image
         run: |
           cd kernel_source
           export ARCH=arm64
