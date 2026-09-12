@@ -1,195 +1,49 @@
-name: Build KNULLI RG28XX H700 RNDIS
+name: Build KNULLI RG28XX with RNDIS
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-env:
-  KNULLI_REPO: https://github.com/knulli-cfw/distribution.git
-  KNULLI_BRANCH: knulli-main
-
-  ORANGEPI_REPO: https://github.com/orangepi-xunlong/linux-orangepi.git
-  ORANGEPI_BRANCH: orange-pi-4.9-sun50iw9
-
-  BOARD_NAME: h700-rg28xx-rndis
-
-  # Keep parallelism reasonable for GitHub's runner.
-  JOBS: 4
-
 jobs:
   build:
-    name: Build complete RG28XX KNULLI image
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
     steps:
-
-      # ==========================================================
-      # HOST DEPENDENCIES
-      # ==========================================================
-
       - name: Install build dependencies
-        shell: bash
         run: |
-          set -euxo pipefail
-
-          sudo dpkg --add-architecture i386
           sudo apt-get update
-
           sudo apt-get install -y \
-            libc6:i386 \
-            libncurses6:i386 \
-            libstdc++6:i386 \
-            build-essential \
-            cmake \
-            git \
-            libncurses-dev \
-            libssl-dev \
-            mercurial \
-            texinfo \
-            zip \
-            pigz \
-            xdelta3 \
-            default-jre \
-            imagemagick \
-            subversion \
-            autoconf \
-            automake \
-            bison \
-            scons \
-            libglib2.0-dev \
-            bc \
-            mtools \
-            u-boot-tools \
-            flex \
-            wget \
-            cpio \
-            dosfstools \
-            libtool \
-            rsync \
-            device-tree-compiler \
-            gettext \
-            locales \
-            graphviz \
-            python3 \
-            python3-dev \
-            gcc-multilib \
-            g++-multilib \
-            file \
-            xz-utils \
-            gzip \
-            zstd \
-            lz4
+            build-essential cmake git libncurses-dev libssl-dev mercurial \
+            texinfo zip pigz xdelta3 default-jre imagemagick subversion \
+            autoconf automake bison scons libglib2.0-dev bc mtools \
+            u-boot-tools flex wget cpio dosfstools libtool rsync \
+            device-tree-compiler gettext locales graphviz python3 \
+            gcc-multilib g++-multilib
 
-          sudo apt-get clean
-
-      # ==========================================================
-      # CLONE KNULLI
-      #
-      # IMPORTANT:
-      # KNULLI's own Makefile expects Buildroot and its related
-      # repositories as submodules.
-      # ==========================================================
-
-      - name: Clone KNULLI
-        shell: bash
+      - name: Checkout KNULLI
         run: |
-          set -euxo pipefail
-
-          git clone \
-            --branch "$KNULLI_BRANCH" \
-            --depth 1 \
-            --recurse-submodules \
-            "$KNULLI_REPO" \
-            knulli
-
+          git clone --depth=1 --recurse-submodules \
+            https://github.com/knulli-cfw/distribution.git knulli
           cd knulli
+          git submodule update --init --recursive
 
-          echo "KNULLI commit:"
-          git rev-parse HEAD
-
-          echo
-          echo "Submodules:"
-          git submodule status || true
-
-      # ==========================================================
-      # VERIFY KNULLI BUILD SYSTEM
-      # ==========================================================
-
-      - name: Verify KNULLI build system
-        shell: bash
+      - name: Install RG28XX RNDIS board definition
+        working-directory: knulli
         run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          test -f Makefile
-          test -f configs/createDefconfig.sh
-          test -d buildroot
-
-          echo "Available H700 board definitions:"
-          find configs \
-            -maxdepth 1 \
-            -type f \
-            -name 'knulli-*.board' \
-            -print \
-            | sort
-
-          echo
-          echo "KNULLI Makefile targets:"
-          make DIRECT_BUILD=1
-
-      # ==========================================================
-      # INSTALL THE EXACT BOARD CONFIGURATION
-      #
-      # This is the board file supplied by the user.
-      #
-      # We intentionally preserve its contents rather than
-      # replacing it with a generic Buildroot defconfig.
-      # ==========================================================
-
-      - name: Install exact H700 board configuration
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          cat > "configs/knulli-${BOARD_NAME}.board" <<'BOARD_EOF'
+          cat > configs/knulli-h700-rg28xx-rndis.board <<'EOF'
           include knulli-board.common
-
-          # Target definition
           BR2_aarch64=y
           BR2_cortex_a53=y
           BR2_ARM_FPU_NEON_FP_ARMV8=y
           BR2_PACKAGE_BATOCERA_TARGET_H700=y
           BR2_TARGET_OPTIMIZATION="-pipe -fsigned-char -mcpu=cortex-a53 -mtune=cortex-a53"
-          #BR2_TARGET_GENERIC_GETTY_PORT="tty1"
           BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
           BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_KNULLI_PATH)/board/patches $(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/patches $(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/h700/patches"
           BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_KNULLI_PATH)/board/fsoverlay $(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/h700/fsoverlay"
           BR2_TARGET_ROOTFS_SQUASHFS4_GZIP=y
-
-          # batocera splash screen
           BR2_PACKAGE_BATOCERA_SPLASH_MPV=y
-
-          # Batocera system
           BR2_PACKAGE_BATOCERA_KODI20=n
           BR2_PACKAGE_MPV=y
-
-          # Bootloader
-          #BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION=y
-          #BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION_VALUE="lts-v2.10.2"
-          #BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM="sun50i_h616"
-          #BR2_TARGET_ARM_TRUSTED_FIRMWARE_IMAGES="bl31.bin"
-          #BR2_PACKAGE_UBOOT_MULTI_H616=y
-
-          # spi flash support
-          #BR2_PACKAGE_MTD=y
-
-          ######
-          # Linux headers same as kernel, a 4.9 series
           BR2_LINUX_KERNEL=y
           BR2_LINUX_KERNEL_CUSTOM_GIT=y
           BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/orangepi-xunlong/linux-orangepi.git"
@@ -204,18 +58,11 @@ jobs:
           BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_4_9=y
           BR2_DEFAULT_KERNEL_HEADERS="4.9.170"
           BR2_TOOLCHAIN_HEADERS_AT_LEAST="4.9"
-
-          # H700 uboot packages
           BR2_PACKAGE_UBOOT_H700=y
-
-          # Filesystem
-          # BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
           BR2_PACKAGE_HOST_DOSFSTOOLS=y
           BR2_PACKAGE_HOST_GENIMAGE=y
           BR2_PACKAGE_HOST_MTOOLS=y
           BR2_PACKAGE_HOST_UBOOT_TOOLS=y
-
-          # FS
           BR2_TARGET_ROOTFS_EXT2_3=y
           BR2_TARGET_ROOTFS_EXT2_GEN=3
           BR2_TARGET_ROOTFS_EXT2_REV=1
@@ -225,18 +72,12 @@ jobs:
           BR2_TARGET_ROOTFS_EXT2_RESBLKS=5
           BR2_TARGET_ROOTFS_EXT2_MKFS_OPTIONS="-O ^64bit"
           BR2_TARGET_ROOTFS_EXT2_NONE=y
-
           BR2_PACKAGE_HAS_LIBMALI=y
           BR2_PACKAGE_PROVIDES_LIBMALI="mali-g31-fbdev"
           BR2_PACKAGE_MALI_G31_FBDEV=y
-
           BR2_PACKAGE_UTIL_LINUX_MOUNT=y
-
-          # ADB
           BR2_PACKAGE_ANDROID_TOOLS=y
           BR2_PACKAGE_ANDROID_TOOLS_ADBD=y
-
-          # SDL1
           BR2_PACKAGE_SDL=y
           BR2_PACKAGE_SDL_FBCON=y
           BR2_PACKAGE_SDL_GFX=y
@@ -247,527 +88,195 @@ jobs:
           BR2_PACKAGE_SDL_SOUND=y
           BR2_PACKAGE_SDL_TTF=y
           BR2_PACKAGE_SDL12_COMPAT=y
-
-          # GDISK
           BR2_PACKAGE_GPTFDISK=y
           BR2_PACKAGE_GPTFDISK_GDISK=y
           BR2_PACKAGE_GPTFDISK_SGDISK=y
-
-          # MISC
           BR2_PACKAGE_PYTHON3_XZ=y
           BR2_PACKAGE_DHCPD=y
-
           BR2_PACKAGE_M8C=y
-          BOARD_EOF
+          EOF
 
-          # Remove YAML indentation from heredoc.
-          sed -i 's/^          //' \
-            "configs/knulli-${BOARD_NAME}.board"
-
-          echo
-          echo "Board file:"
-          cat "configs/knulli-${BOARD_NAME}.board"
-
-      # ==========================================================
-      # CREATE RNDIS KERNEL CONFIG FRAGMENT
-      # ==========================================================
-
-      - name: Create RNDIS kernel config fragment
-        shell: bash
+      - name: Add RNDIS kernel configuration
+        working-directory: knulli
         run: |
-          set -euxo pipefail
-
-          cd knulli
-
           mkdir -p board/allwinner/h700/rndis
-
           cat > board/allwinner/h700/rndis/rndis.config <<'EOF'
           CONFIG_USB_USBNET=y
           CONFIG_USB_NET_CDCETHER=y
           CONFIG_USB_NET_RNDIS_HOST=m
           EOF
 
-          sed -i 's/^          //' \
-            board/allwinner/h700/rndis/rndis.config
-
-          echo "RNDIS configuration:"
-          cat board/allwinner/h700/rndis/rndis.config
-
-      # ==========================================================
-      # GET THE EXACT ORANGE PI BSP SOURCE
-      #
-      # This is NOT generic upstream 4.9.170.
-      #
-      # We clone the exact source branch referenced by the
-      # supplied .board file.
-      # ==========================================================
-
-      - name: Clone exact Orange Pi H700 BSP
-        shell: bash
+      - name: Add RNDIS config fragment to board
+        working-directory: knulli
         run: |
-          set -euxo pipefail
-
-          git clone \
-            --depth 1 \
-            --branch "$ORANGEPI_BRANCH" \
-            "$ORANGEPI_REPO" \
-            orange-pi-kernel
-
-          cd orange-pi-kernel
-
-          echo "Orange Pi kernel commit:"
-          git rev-parse HEAD
-
-          echo
-          echo "Kernel version:"
-          head -5 Makefile
-
-          test -f drivers/net/usb/cdc_ether.c
-          test -f drivers/net/usb/rndis_host.c
-
-      # ==========================================================
-      # PATCH cdc_ether.c
-      #
-      # The BSP already contains the generic Android RNDIS
-      # fallback. We add an explicit quirk for the user's:
-      #
-      #     1782:000c
-      #
-      # Spreadtrum / Unisoc phone.
-      #
-      # This forces the known-good interface pairing:
-      #
-      #     interface 0 = RNDIS control
-      #     interface 1 = RNDIS data
-      #
-      # without relying on the broken CDC Union descriptor.
-      # ==========================================================
-
-      - name: Patch Orange Pi cdc_ether
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd orange-pi-kernel
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path("drivers/net/usb/cdc_ether.c")
-          text = path.read_text()
-
-          original = text
-
-          # ------------------------------------------------------
-          # Add an explicit Unisoc/Spreadtrum quirk variable.
-          # ------------------------------------------------------
-
-          old = """\tint\t\t\tstatus;
-          \tint\t\t\trndis;
-          \tbool\t\t\tandroid_rndis_quirk = false;
-          """
-
-          new = """\tint\t\t\tstatus;
-          \tint\t\t\trndis;
-          \tbool\t\t\tandroid_rndis_quirk = false;
-          \tbool\t\t\tunisoc_rndis_quirk = false;
-          """
-
-          if old not in text:
-              raise SystemExit(
-                  "Could not locate cdc_ether RNDIS declarations"
-              )
-
-          text = text.replace(old, new, 1)
-
-          # ------------------------------------------------------
-          # Detect 1782:000c.
-          # ------------------------------------------------------
-
-          old = """\trndis = (is_rndis(&intf->cur_altsetting->desc) ||
-          \t\t is_activesync(&intf->cur_altsetting->desc) ||
-          \t\t is_wireless_rndis(&intf->cur_altsetting->desc));
-          """
-
-          new = """\trndis = (is_rndis(&intf->cur_altsetting->desc) ||
-          \t\t is_activesync(&intf->cur_altsetting->desc) ||
-          \t\t is_wireless_rndis(&intf->cur_altsetting->desc));
-
-          \t/*
-          \t * Unisoc / Spreadtrum Android tethering device:
-          \t * USB ID 1782:000c.
-          \t *
-          \t * This device exposes RNDIS control/data as interfaces
-          \t * 0 and 1 but can advertise a broken CDC Union descriptor.
-          \t */
-          \tunisoc_rndis_quirk =
-          \t\t(idVendor == 0x1782 && idProduct == 0x000c);
-          """
-
-          if old not in text:
-              raise SystemExit(
-                  "Could not locate cdc_ether RNDIS detection"
-              )
-
-          # The old source does not have idVendor/idProduct variables.
-          new = new.replace(
-              "\tunisoc_rndis_quirk =\n"
-              "\t\t(idVendor == 0x1782 && idProduct == 0x000c);",
-              """\tunisoc_rndis_quirk =
-          \t\t(dev->udev->descriptor.idVendor == cpu_to_le16(0x1782) &&
-          \t\t dev->udev->descriptor.idProduct == cpu_to_le16(0x000c));"""
-          )
-
-          text = text.replace(old, new, 1)
-
-          # ------------------------------------------------------
-          # Force the Android fallback for this device.
-          # ------------------------------------------------------
-
-          old = """\tif (rndis && (!info->u || android_rndis_quirk)) {
-          \t\tinfo->control = usb_ifnum_to_if(dev->udev, 0);
-          \t\tinfo->data = usb_ifnum_to_if(dev->udev, 1);
-          """
-
-          new = """\tif (rndis && (!info->u ||
-          \t\tandroid_rndis_quirk || unisoc_rndis_quirk)) {
-          \t\tinfo->control = usb_ifnum_to_if(dev->udev, 0);
-          \t\tinfo->data = usb_ifnum_to_if(dev->udev, 1);
-          """
-
-          if old not in text:
-              raise SystemExit(
-                  "Could not locate Android RNDIS fallback"
-              )
-
-          text = text.replace(old, new, 1)
-
-          if text == original:
-              raise SystemExit("No changes made")
-
-          path.write_text(text)
-          PY
-
-          echo
-          echo "Patched cdc_ether:"
-          grep -n -A8 -B5 \
-            'unisoc_rndis_quirk' \
-            drivers/net/usb/cdc_ether.c
-
-      # ==========================================================
-      # CREATE BUILDROOT KERNEL PATCH
-      #
-      # KNULLI's board file already points BR2_GLOBAL_PATCH_DIR
-      # at board/allwinner/h700/patches.
-      #
-      # Buildroot then applies patches from:
-      #
-      #   board/allwinner/h700/patches/linux/
-      # ==========================================================
-
-      - name: Install generated Linux patch
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          mkdir -p board/allwinner/h700/patches/linux
-
-          cp ../orange-pi-kernel/drivers/net/usb/cdc_ether.c \
-            /tmp/patched-cdc-ether.c
-
-          cd ../orange-pi-kernel
-
-          git diff -- \
-            drivers/net/usb/cdc_ether.c \
-            > ../knulli/board/allwinner/h700/patches/linux/0001-unisoc-1782-000c-rndis.patch
-
-          test -s \
-            ../knulli/board/allwinner/h700/patches/linux/0001-unisoc-1782-000c-rndis.patch
-
-          echo "Generated kernel patch:"
-          sed -n '1,240p' \
-            ../knulli/board/allwinner/h700/patches/linux/0001-unisoc-1782-000c-rndis.patch
-
-      # ==========================================================
-      # VERIFY PATCH APPLIES CLEANLY TO THE EXACT BSP
-      # ==========================================================
-
-      - name: Verify Linux patch
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf verify-kernel
-
-          git clone \
-            --depth 1 \
-            --branch "$ORANGEPI_BRANCH" \
-            "$ORANGEPI_REPO" \
-            verify-kernel
-
-          cd verify-kernel
-
-          git apply \
-            ../knulli/board/allwinner/h700/patches/linux/0001-unisoc-1782-000c-rndis.patch
-
-          echo "Patch applies cleanly."
-
-          grep -n -A8 -B5 \
-            'unisoc_rndis_quirk' \
-            drivers/net/usb/cdc_ether.c
-
-      # ==========================================================
-      # CREATE THE DEFCONFIG
-      #
-      # EXTRA_OPTS are appended by KNULLI's Makefile to the
-      # generated defconfig.
-      #
-      # We use a kernel config fragment so the supplied board
-      # configuration remains otherwise unchanged.
-      # ==========================================================
-
-      - name: Generate KNULLI defconfig
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          make \
-            DIRECT_BUILD=1 \
-            "$BOARD_NAME-config" \
-            EXTRA_OPTS="BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=\$(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/h700/rndis/rndis.config"
-
-          echo
-          echo "Generated defconfig:"
-          grep -E \
-            'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES|BR2_LINUX_KERNEL_CUSTOM_REPO|BR2_PACKAGE_UBOOT_H700|BR2_PACKAGE_HOST_GENIMAGE' \
-            "configs/knulli-${BOARD_NAME}_defconfig"
-
-      # ==========================================================
-      # BUILD COMPLETE KNULLI IMAGE
-      #
-      # KNULLI's Makefile:
-      #
-      #   - generates the Buildroot config
-      #   - downloads/builds the exact Orange Pi kernel
-      #   - builds H700 U-Boot
-      #   - builds KNULLI userspace
-      #   - runs genimage/post-image processing
-      #
-      # No manually assembled boot.img is used.
-      # ==========================================================
-
-      - name: Build complete RG28XX image
-        shell: bash
-        env:
-          EXTRA_OPTS: >-
-            BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=$(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/h700/rndis/rndis.config
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          make \
-            DIRECT_BUILD=1 \
-            MAKE_JLEVEL="$JOBS" \
-            "$BOARD_NAME-build" \
-            EXTRA_OPTS="$EXTRA_OPTS"
-
-      # ==========================================================
-      # VERIFY KERNEL CONFIG
-      # ==========================================================
-
-      - name: Verify final kernel configuration
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          CONFIG="output/${BOARD_NAME}/.config"
-
-          test -f "$CONFIG"
-
-          echo "Final kernel-related Buildroot settings:"
-          grep -E \
-            'BR2_LINUX_KERNEL|BR2_PACKAGE_UBOOT_H700|BR2_PACKAGE_HOST_GENIMAGE' \
-            "$CONFIG" \
-            | grep -E \
-              'CUSTOM_REPO|CUSTOM_REPO_VERSION|KERNEL_VERSION|UBOOT_H700|GENIMAGE' \
-            || true
-
-          echo
-          echo "Final RNDIS fragment:"
-          cat board/allwinner/h700/rndis/rndis.config
-
-          echo
-          echo "Checking generated Linux .config..."
-
-          find "output/${BOARD_NAME}/build" \
-            -maxdepth 3 \
-            -name .config \
-            -path '*linux*' \
-            -print
-
-          find "output/${BOARD_NAME}/build" \
-            -maxdepth 3 \
-            -name .config \
-            -path '*linux*' \
-            -exec grep -H \
-              -E \
-              'CONFIG_USB_USBNET=|CONFIG_USB_NET_CDCETHER=|CONFIG_USB_NET_RNDIS_HOST=' \
-              {} \; \
-            || true
-
-      # ==========================================================
-      # VERIFY RNDIS MODULE
-      # ==========================================================
-
-      - name: Verify rndis_host.ko
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          echo "Searching final target for rndis_host.ko..."
-
-          find "output/${BOARD_NAME}" \
-            -name 'rndis_host.ko*' \
-            -print \
-            | tee /tmp/rndis-files.txt
-
-          test -s /tmp/rndis-files.txt
-
-          echo
-          echo "Module information:"
-
-          while read -r module; do
-            file "$module"
-            "${PWD}/output/${BOARD_NAME}/host/bin/modinfo" \
-              "$module" \
-              2>/dev/null \
-              || true
-          done < /tmp/rndis-files.txt
-
-      # ==========================================================
-      # LOCATE COMPLETE IMAGE
-      # ==========================================================
-
-      - name: Locate final KNULLI image
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          find "output/${BOARD_NAME}" \
-            -type f \
-            \( \
-              -name '*.img.gz' \
-              -o -name '*.img.xz' \
-              -o -name '*.img.zst' \
-              -o -name '*.img' \
-            \) \
-            -print \
-            | tee /tmp/final-images.txt
-
-          test -s /tmp/final-images.txt
-
-      # ==========================================================
-      # COLLECT RELEASE ARTIFACTS
-      # ==========================================================
-
-      - name: Prepare artifacts
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd knulli
-
-          mkdir -p ../release
-
-          while read -r image; do
-            cp "$image" ../release/
-          done < /tmp/final-images.txt
-
-          # Kernel config used for reproducibility.
-          cp \
-            "output/${BOARD_NAME}/.config" \
-            ../release/buildroot.config
-
-          cp \
-            board/allwinner/h700/rndis/rndis.config \
-            ../release/rndis-kernel.config
-
-          cp \
-            board/allwinner/h700/patches/linux/0001-unisoc-1782-000c-rndis.patch \
-            ../release/
-
-          # Save the exact KNULLI board definition.
-          cp \
-            "configs/knulli-${BOARD_NAME}.board" \
-            ../release/
-
-          # Record source revisions.
-          {
-            echo "KNULLI:"
-            git rev-parse HEAD
-
-            echo
-            echo "Orange Pi kernel:"
-            cd ../orange-pi-kernel
-            git rev-parse HEAD
-          } > ../release/SOURCE-COMMITS.txt
-
-          cd ..
-
-          sha256sum release/* \
-            > release/SHA256SUMS
-
-          cat > release/README-RG28XX-RNDIS.txt <<'EOF'
-          KNULLI RG28XX H700 RNDIS build
-
-          Target:
-            Anbernic RG28XX
-            Allwinner H700 / sun50iw9
-            ARM64 / Cortex-A53
-            Linux 4.9.170
-
-          Kernel:
-            Orange Pi linux-orangepi
-            branch: orange-pi-4.9-sun50iw9
-
-          USB networking:
-            CONFIG_USB_USBNET=y
-            CONFIG_USB_NET_CDCETHER=y
-            CONFIG_USB_NET_RNDIS_HOST=m
-
-          Device-specific fix:
-            Spreadtrum / Unisoc
-            USB ID 1782:000c
-
-          The build uses KNULLI's complete Buildroot image
-          generation including H700 U-Boot and genimage.
-
-          Flash the generated .img.gz as a normal KNULLI
-          RG28XX image.
-
-          Keep your existing working KNULLI SD card as a
-          recovery copy until this build has been tested.
+          cat >> configs/knulli-h700-rg28xx-rndis.board <<'EOF'
+          BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/h700/rndis/rndis.config"
           EOF
 
-      # ==========================================================
-      # UPLOAD COMPLETE FLASHABLE IMAGE
-      # ==========================================================
+      - name: Add Unisoc 1782:000c RNDIS quirk
+        working-directory: knulli
+        run: |
+          mkdir -p board/allwinner/h700/patches/linux
 
-      - name: Upload complete RG28XX image
+          git clone --depth=1 --branch orange-pi-4.9-sun50iw9 \
+            https://github.com/orangepi-xunlong/linux-orangepi.git /tmp/orange-pi-kernel
+
+          cd /tmp/orange-pi-kernel
+          git fetch --unshallow >/dev/null 2>&1 || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/net/usb/cdc_ether.c")
+          s = p.read_text()
+
+          # The exact Orange Pi 4.9.170 BSP already contains its Android
+          # RNDIS descriptor workaround. Do not try to rediscover/reinject
+          # that code using fragile text matching.
+          if "android_rndis_quirk" not in s:
+              raise SystemExit(
+                  "Expected Orange Pi Android RNDIS workaround is missing; "
+                  "refusing to apply an unverified patch."
+              )
+
+          # Add a device-specific quirk only to the existing bind path.
+          marker = "bool android_rndis_quirk = false;"
+          if "unisoc_1782_000c_quirk" not in s:
+              replacement = """bool android_rndis_quirk = false;
+              bool unisoc_1782_000c_quirk = false;"""
+              if marker not in s:
+                  raise SystemExit("Could not locate the known BSP RNDIS quirk declaration")
+              s = s.replace(marker, replacement, 1)
+
+              old = """if (rndis && (!info->u || android_rndis_quirk)) {
+                  info->u = &rndis_union_desc;
+                  info->control = intf;
+                  info->data = usb_ifnum_to_if(udev, 1);
+              }"""
+              new = """if (rndis && (!info->u || android_rndis_quirk ||
+                             unisoc_1782_000c_quirk)) {
+                  info->u = &rndis_union_desc;
+                  info->control = intf;
+                  info->data = usb_ifnum_to_if(udev, 1);
+              }"""
+
+              # Set the device-specific flag immediately before the existing
+              # generic Android workaround logic.
+              needle = "if (rndis && !info->u) {"
+              if needle not in s:
+                  raise SystemExit("Could not locate the existing RNDIS bind path")
+
+              s = s.replace(
+                  needle,
+                  """unisoc_1782_000c_quirk =
+                      (le16_to_cpu(udev->descriptor.idVendor) == 0x1782 &&
+                       le16_to_cpu(udev->descriptor.idProduct) == 0x000c);
+
+              """ + needle,
+                  1
+              )
+
+              if old not in s:
+                  raise SystemExit(
+                      "Could not locate the exact Orange Pi RNDIS interface fallback; "
+                      "source layout differs from the verified BSP."
+                  )
+              s = s.replace(old, new, 1)
+
+              p.write_text(s)
+
+          PY
+
+          cd /tmp/orange-pi-kernel
+          git diff -- drivers/net/usb/cdc_ether.c > /tmp/unisoc-rndis.patch
+
+          test -s /tmp/unisoc-rndis.patch
+          cp /tmp/unisoc-rndis.patch \
+            "$GITHUB_WORKSPACE/knulli/board/allwinner/h700/patches/linux/0001-rg28xx-unisoc-1782-000c-rndis.patch"
+
+      - name: Verify generated patch
+        working-directory: knulli
+        run: |
+          test -s board/allwinner/h700/patches/linux/0001-rg28xx-unisoc-1782-000c-rndis.patch
+          grep -q '1782' board/allwinner/h700/patches/linux/0001-rg28xx-unisoc-1782-000c-rndis.patch
+          grep -q '000c' board/allwinner/h700/patches/linux/0001-rg28xx-unisoc-1782-000c-rndis.patch
+          grep -q 'unisoc_1782_000c_quirk' board/allwinner/h700/patches/linux/0001-rg28xx-unisoc-1782-000c-rndis.patch
+
+      - name: Generate Buildroot defconfig
+        working-directory: knulli
+        run: |
+          ./configs/createDefconfig.sh ./configs/knulli-h700-rg28xx-rndis
+          test -f configs/knulli-h700-rg28xx-rndis_defconfig
+          grep -q 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES' \
+            configs/knulli-h700-rg28xx-rndis_defconfig
+
+      - name: Build complete KNULLI image
+        working-directory: knulli
+        env:
+          MAKE_JLEVEL: 4
+        run: |
+          make DIRECT_BUILD=1 MAKE_JLEVEL=4 \
+            h700-rg28xx-rndis-build
+
+      - name: Verify kernel RNDIS support
+        working-directory: knulli
+        run: |
+          CONFIG="$(find output/h700-rg28xx-rndis -name .config -path '*/linux-*/*' | head -1)"
+          if [ -z "$CONFIG" ]; then
+            CONFIG="output/h700-rg28xx-rndis/build/linux-*/.config"
+          fi
+
+          echo "Kernel config:"
+          grep -E '^CONFIG_USB_USBNET=|^CONFIG_USB_NET_CDCETHER=|^CONFIG_USB_NET_RNDIS_HOST=' \
+            output/h700-rg28xx-rndis/build/linux-*/.config
+
+          grep -q '^CONFIG_USB_USBNET=y$' \
+            output/h700-rg28xx-rndis/build/linux-*/.config
+          grep -q '^CONFIG_USB_NET_CDCETHER=y$' \
+            output/h700-rg28xx-rndis/build/linux-*/.config
+          grep -q '^CONFIG_USB_NET_RNDIS_HOST=m$' \
+            output/h700-rg28xx-rndis/build/linux-*/.config
+
+          find output/h700-rg28xx-rndis -name 'rndis_host.ko' -print
+
+      - name: Locate final image
+        id: image
+        working-directory: knulli
+        run: |
+          IMG="$(find output/h700-rg28xx-rndis/images -type f \
+            \( -name '*.img.gz' -o -name '*.img' \) | head -1)"
+
+          if [ -z "$IMG" ]; then
+            echo "No final KNULLI image found"
+            find output/h700-rg28xx-rndis/images -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "Built image: $IMG"
+
+      - name: Package build metadata
+        working-directory: knulli
+        run: |
+          {
+            echo "KNULLI RG28XX RNDIS build"
+            echo
+            echo "Kernel: Linux 4.9.170"
+            echo "Target: Allwinner H700 / RG28XX"
+            echo "RNDIS: CONFIG_USB_NET_RNDIS_HOST=m"
+            echo "usbnet: CONFIG_USB_USBNET=y"
+            echo "cdc_ether: CONFIG_USB_NET_CDCETHER=y"
+            echo "USB device quirk: Unisoc 1782:000c"
+            echo
+            echo "This image is built using the KNULLI Buildroot/genimage pipeline."
+          } > rndis-build-info.txt
+
+      - name: Upload complete image
         uses: actions/upload-artifact@v4
         with:
-          name: knulli-rg28xx-h700-rndis
-          path: release/
+          name: knulli-h700-rg28xx-rndis
+          path: |
+            knulli/${{ steps.image.outputs.image }}
+            knulli/rndis-build-info.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 14
