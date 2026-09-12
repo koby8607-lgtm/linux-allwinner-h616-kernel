@@ -1,4 +1,4 @@
-name: Build Patched KNULLI H700 Kernel Image
+name: Build Patched KNULLI cdc_ether.ko Module
 
 on:
   workflow_dispatch:
@@ -8,30 +8,20 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout GitHub Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Build Toolchain & Dependencies
+      - name: Install Toolchain & Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git libc6-dev python3
+          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git python3
 
-      - name: Fetch Official KNULLI Kernel Source
+      - name: Fetch KNULLI-Matched H700 Kernel Source
         run: |
-          # Fetch the H700 kernel tree targeted by KNULLI
-          git clone --depth 1 -b master https://github.com/knulli-cfw/knulli-linux.git knulli_repo || \
+          # Fetch the exact Linux 4.9.170 kernel tree used by KNULLI H700 builds
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
-          if [ -d "knulli_repo/board/batocera/allwinner/h700/linux" ]; then
-            echo "KNULLI buildroot board directory located."
-          fi
-
-          # Clone the clean kernel source matching KNULLI's target
-          if [ ! -d "kernel_source" ]; then
-            git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
-          fi
-
-      - name: Patch cdc_ether.c via Python Script
+      - name: Patch cdc_ether.c for Android/Unisoc RNDIS
         run: |
           python3 -c '
           from pathlib import Path
@@ -76,59 +66,54 @@ jobs:
           print("Successfully patched kernel source: drivers/net/usb/cdc_ether.c")
           '
 
-      - name: Configure Kernel Tree (Defconfig Matching KNULLI)
+      - name: Prepare Headers & Module Build Tree
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          # Find Allwinner sun50iw9/H700 defconfig used by KNULLI board specs
-          if [ -f "arch/arm64/configs/sun50iw9p1_defconfig" ]; then
-            cp arch/arm64/configs/sun50iw9p1_defconfig .config
-          else
-            CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
-            cp "$CONFIG_PATH" .config
-          fi
+          CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
+          cp "$CONFIG_PATH" .config
 
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
           scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
 
-          # Enable RNDIS USB Networking Drivers
+          # Enable CDC Ether as a loadable module
           scripts/config --file .config --enable CONFIG_NETDEVICES
           scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
           scripts/config --file .config --enable CONFIG_USB_USBNET
-          scripts/config --file .config --enable CONFIG_USB_NET_CDCETHER
-          scripts/config --file .config --enable CONFIG_USB_NET_RNDIS_HOST
+          scripts/config --file .config --module CONFIG_USB_NET_CDCETHER
+          scripts/config --file .config --module CONFIG_USB_NET_RNDIS_HOST
           scripts/config --file .config --enable CONFIG_MII
 
           make ARCH=arm64 olddefconfig
 
-          # Prepare toolchain headers
-          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j1
-          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j1
+          # Prepare kernel module headers without compiling full kernel Image
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" modules_prepare -j$(nproc)
 
-      - name: Compile KNULLI Kernel Image
+      - name: Compile Patched cdc_ether.ko
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
+          # Target drivers/net/usb directory specifically
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCFLAGS="-w" \
             KCFLAGS="-w" \
-            LOCALVERSION="" \
-            Image -j$(nproc)
+            M=drivers/net/usb \
+            modules -j$(nproc)
 
-      - name: Collect & Package Kernel Artifact
+      - name: Package Module Artifact
         run: |
           mkdir output
-          cp kernel_source/arch/arm64/boot/Image output/
+          cp kernel_source/drivers/net/usb/cdc_ether.ko output/
           ls -lh output/
 
-      - name: Upload Kernel Artifact
+      - name: Upload cdc_ether.ko Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: knulli-patched-kernel-image
-          path: output/Image
+          name: cdc_ether-knulli-patched
+          path: output/cdc_ether.ko
